@@ -40,7 +40,7 @@ class MainWindow(QMainWindow):
 
         # Create views
         self.welcome_screen = WelcomeScreen()
-        self.calendar_view = CalendarView()
+        self.calendar_view = CalendarView(self.db_manager)
 
         # Add views to stack
         self.stack.addWidget(self.welcome_screen)
@@ -89,6 +89,7 @@ class MainWindow(QMainWindow):
 
         if plans:
             self.current_plan = plans[0]
+            self.calendar_view.set_plan(self.current_plan, self.db_manager)
             self.stack.setCurrentWidget(self.calendar_view)
         else:
             self.stack.setCurrentWidget(self.welcome_screen)
