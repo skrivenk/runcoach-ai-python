@@ -1,10 +1,14 @@
 """Main Window for RunCoach AI"""
 
-from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-                              QLabel, QPushButton, QStackedWidget, QMessageBox)
+from PySide6.QtWidgets import (
+    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QLabel, QPushButton, QStackedWidget, QMessageBox
+)
 from PySide6.QtCore import Qt
-from ui.welcome_screen import WelcomeScreen
-from ui.calendar_view import CalendarView
+
+# IMPORTANT: main_window.py is inside the ui/ package, so use RELATIVE imports
+from .welcome_screen import WelcomeScreen
+from .calendar_view import CalendarView
 
 
 class MainWindow(QMainWindow):
@@ -14,7 +18,7 @@ class MainWindow(QMainWindow):
         self.current_plan = None
 
         self.setWindowTitle("🏃 RunCoach AI")
-        self.setMinimumSize(1200, 800)
+        self.setMinimumSize(900, 600)
         self.resize(1200, 800)
 
         self.init_ui()
@@ -48,13 +52,14 @@ class MainWindow(QMainWindow):
 
         main_layout.addWidget(self.stack)
 
-        # Connect signals
-        self.welcome_screen.create_plan_clicked.connect(self.show_plan_wizard)
+        # Connect signals (make sure names match WelcomeScreen)
+        self.welcome_screen.create_plan_requested.connect(self.show_plan_wizard)
+        self.welcome_screen.import_plan_requested.connect(self.show_import_dialog)
 
         # Set layout
         central_widget.setLayout(main_layout)
 
-        # Show welcome screen by default
+        # Decide which screen to show
         self.check_for_plans()
 
     def create_header(self) -> QWidget:
@@ -84,29 +89,64 @@ class MainWindow(QMainWindow):
         return header
 
     def check_for_plans(self):
-        """Check if any plans exist"""
-        plans = self.db_manager.get_all_plans()
-
-        if plans:
-            self.current_plan = plans[0]
-            self.calendar_view.set_plan(self.current_plan, self.db_manager)
-            self.stack.setCurrentWidget(self.calendar_view)
-        else:
+        """Decide which screen to show and bind the current plan to the calendar."""
+        current_plan_id = self.db_manager.get_current_plan_id()
+        if not current_plan_id:
             self.stack.setCurrentWidget(self.welcome_screen)
+            return
+
+        plan = self.db_manager.get_plan_by_id(current_plan_id)
+        if not plan:
+            self.stack.setCurrentWidget(self.welcome_screen)
+            return
+
+        self.calendar_view.set_current_plan(plan)
+        self.stack.setCurrentWidget(self.calendar_view)
 
     def show_plan_wizard(self):
         """Show the plan creation wizard"""
+        # Relative import because this file is inside ui/
+        from .plan_wizard import PlanWizard
+        wizard = PlanWizard(self)
+        wizard.plan_created.connect(self.on_plan_created)
+        wizard.exec()
 
-        # For now, just show a message
-        # We'll implement the full wizard next
-        msg = QMessageBox()
-        msg.setWindowTitle("Plan Creation")
-        msg.setText("Plan creation wizard coming soon!\n\nFor now, here's a test plan being created...")
-        msg.setIcon(QMessageBox.Icon.Information)
-        msg.exec()
+    def on_plan_created(self, plan_data: dict):
+        """Persist the plan + baseline + seed workouts; then show the calendar."""
+        # 1) plan
+        plan_id = self.db_manager.create_plan(plan_data)
 
-        # Create a test plan
-        self.create_test_plan()
+        # 2) baseline (optional but recommended)
+        baseline = {
+            "plan_id": plan_id,
+            "date": plan_data["start_date"],
+            "distance": plan_data["baseline_distance"],
+            "time_seconds": plan_data["baseline_time"],
+            "rpe": plan_data.get("baseline_rpe"),
+            "avg_hr": None,
+            "elevation_gain": None,
+            "notes": None,
+        }
+        self.db_manager.create_baseline_run(baseline)
+
+        # 3) seed a week so calendar shows something
+        from datetime import datetime, timedelta
+        start_dt = datetime.fromisoformat(plan_data["start_date"])
+        for i in range(7):
+            self.db_manager.create_workout({
+                "plan_id": plan_id,
+                "date": (start_dt + timedelta(days=i)).strftime("%Y-%m-%d"),
+                "workout_type": "easy" if i % 2 == 0 else "tempo",
+                "planned_distance": 5.0,
+                "planned_intensity": None,
+                "description": f"Day {i + 1} (AI generation soon)",
+                "notes": None,
+                "modified_by": "initial_gen",
+            })
+
+        # 4) remember + show calendar
+        self.db_manager.set_current_plan_id(plan_id)
+        self.check_for_plans()
 
     def create_test_plan(self):
         """Create a test plan for demonstration"""
@@ -143,11 +183,20 @@ class MainWindow(QMainWindow):
         # Reload plans and show calendar
         self.check_for_plans()
 
+    def show_import_dialog(self):
+        """Placeholder for importing an existing plan (prevents crashes for now)."""
+        QMessageBox.information(
+            self,
+            "Import Plan",
+            "Importing an existing plan is coming soon.\n\n"
+            "For now, use 'Create Your First Training Plan' to get started."
+        )
+
     def show_settings(self):
         """Show settings dialog"""
         msg = QMessageBox()
         msg.setWindowTitle("Settings")
-        msg.setText("Settings dialog coming soon!")
+        msg.setText("Settings dialog coming soon! Be patient 🙂")
         msg.exec()
 
     def apply_styles(self):
