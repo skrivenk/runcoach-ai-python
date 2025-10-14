@@ -60,6 +60,35 @@ class DatabaseManager:
             conn.executescript(f.read())
         print(f"Database initialized at: {self.db_path}")
 
+    def get_workouts_on_date(self, plan_id: int, date_str: str) -> list[dict]:
+        """All workouts for a plan on a specific date."""
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT * FROM workouts
+                WHERE plan_id = ? AND date = ? AND (is_current_version = 1 OR is_current_version IS NULL)
+                ORDER BY id ASC
+            """, (plan_id, date_str))
+            return [dict(r) for r in cur.fetchall()]
+
+    def update_workout(self, workout_id: int, fields: dict):
+        """Generic partial update. fields keys must match column names."""
+        if not fields:
+            return
+        cols = ", ".join([f"{k} = ?" for k in fields.keys()])
+        vals = list(fields.values())
+        vals.append(workout_id)
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(f"UPDATE workouts SET {cols} WHERE id = ?", vals)
+
+    def delete_workout(self, workout_id: int):
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("DELETE FROM workouts WHERE id = ?", (workout_id,))
+
+
+
     # --------------
     # Plan operations
     # --------------
