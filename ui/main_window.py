@@ -5,6 +5,7 @@ from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
 from PySide6.QtCore import Qt
 from ui.welcome_screen import WelcomeScreen
 from ui.calendar_view import CalendarView
+from ui.settings_dialog import SettingsDialog  # NEW
 
 
 class MainWindow(QMainWindow):
@@ -14,51 +15,42 @@ class MainWindow(QMainWindow):
         self.current_plan = None
 
         self.setWindowTitle("🏃 RunCoach AI")
-        self.setMinimumSize(1200, 800)
+        self.setMinimumSize(1000, 700)
         self.resize(1200, 800)
 
         self.init_ui()
         self.apply_styles()
 
     def init_ui(self):
-        """Initialize the user interface"""
-        # Central widget
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
 
-        # Main layout
         main_layout = QVBoxLayout()
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
 
-        # Header
         header = self.create_header()
         main_layout.addWidget(header)
 
-        # Stacked widget for different views
         self.stack = QStackedWidget()
 
-        # Create views
         self.welcome_screen = WelcomeScreen()
         self.calendar_view = CalendarView(self.db_manager)
 
-        # Add views to stack
         self.stack.addWidget(self.welcome_screen)
         self.stack.addWidget(self.calendar_view)
 
         main_layout.addWidget(self.stack)
 
-        # Connect signals
-        self.welcome_screen.create_plan_clicked.connect(self.show_plan_wizard)
+        # If you later wire Import Plan:
+        # self.welcome_screen.import_plan_requested.connect(self.show_import_dialog)
 
-        # Set layout
         central_widget.setLayout(main_layout)
 
-        # Show welcome screen by default
         self.check_for_plans()
+        self._apply_planner_config_from_db()  # load settings on startup
 
     def create_header(self) -> QWidget:
-        """Create the header bar"""
         header = QWidget()
         header.setObjectName("header")
         header.setFixedHeight(70)
@@ -66,14 +58,12 @@ class MainWindow(QMainWindow):
         layout = QHBoxLayout()
         layout.setContentsMargins(24, 0, 24, 0)
 
-        # Title
         title = QLabel("🏃 RunCoach AI")
         title.setObjectName("title")
 
         layout.addWidget(title)
         layout.addStretch()
 
-        # Settings button
         settings_btn = QPushButton("Settings")
         settings_btn.setObjectName("headerButton")
         settings_btn.clicked.connect(self.show_settings)
@@ -84,114 +74,84 @@ class MainWindow(QMainWindow):
         return header
 
     def check_for_plans(self):
-        """Check if any plans exist"""
-        plans = self.db_manager.get_all_plans()
-
-        if plans:
-            self.current_plan = plans[0]
-            self.calendar_view.set_plan(self.current_plan, self.db_manager)
-            self.stack.setCurrentWidget(self.calendar_view)
-        else:
+        current_plan_id = self.db_manager.get_current_plan_id()
+        if not current_plan_id:
             self.stack.setCurrentWidget(self.welcome_screen)
+            return
+
+        plan = self.db_manager.get_plan_by_id(current_plan_id)
+        if not plan:
+            self.stack.setCurrentWidget(self.welcome_screen)
+            return
+
+        self.calendar_view.set_current_plan(plan)
+        self.stack.setCurrentWidget(self.calendar_view)
 
     def show_plan_wizard(self):
         """Show the plan creation wizard"""
+        from ui.plan_wizard import PlanWizard
+        wizard = PlanWizard(self)
+        wizard.plan_created.connect(self.on_plan_created)
+        wizard.exec()
 
-        # For now, just show a message
-        # We'll implement the full wizard next
-        msg = QMessageBox()
-        msg.setWindowTitle("Plan Creation")
-        msg.setText("Plan creation wizard coming soon!\n\nFor now, here's a test plan being created...")
-        msg.setIcon(QMessageBox.Icon.Information)
-        msg.exec()
-
-        # Create a test plan
-        self.create_test_plan()
-
-    def create_test_plan(self):
-        """Create a test plan for demonstration"""
-        from datetime import date, timedelta
-
-        plan_data = {
-            'name': 'Marathon Training - Test',
-            'goal_type': 'marathon',
-            'start_date': date.today().isoformat(),
-            'race_date': (date.today() + timedelta(weeks=12)).isoformat(),
-            'duration_weeks': 12,
-            'max_days_per_week': 5,
-            'long_run_day': 'Sunday',
-            'weekly_increase_cap': 0.10,
-            'long_run_cap': 0.30,
-            'guardrails_enabled': True
-        }
-
+    def on_plan_created(self, plan_data: dict):
         plan_id = self.db_manager.create_plan(plan_data)
 
-        # Create some test workouts
-        start_date = date.today()
-        for i in range(7):
-            workout_data = {
-                'plan_id': plan_id,
-                'date': (start_date + timedelta(days=i)).isoformat(),
-                'workout_type': 'easy' if i % 2 == 0 else 'tempo',
-                'planned_distance': 5.0,
-                'description': f'Day {i + 1} workout',
-                'modified_by': 'initial_gen'
+        # Optional baseline
+        if plan_data.get("baseline_distance") and plan_data.get("baseline_time"):
+            baseline = {
+                "plan_id": plan_id,
+                "date": plan_data["start_date"],
+                "distance": plan_data["baseline_distance"],
+                "time_seconds": plan_data["baseline_time"],
+                "rpe": plan_data.get("baseline_rpe"),
+                "avg_hr": None, "elevation_gain": None, "notes": None,
             }
-            self.db_manager.create_workout(workout_data)
+            self.db_manager.create_baseline_run(baseline)
 
-        # Reload plans and show calendar
+        # Seed a week so calendar shows something
+        from datetime import datetime, timedelta
+        start_dt = datetime.fromisoformat(plan_data["start_date"])
+        for i in range(7):
+            self.db_manager.create_workout({
+                "plan_id": plan_id,
+                "date": (start_dt + timedelta(days=i)).strftime("%Y-%m-%d"),
+                "workout_type": "easy" if i % 2 == 0 else "tempo",
+                "planned_distance": 5.0,
+                "planned_intensity": None,
+                "description": f"Day {i + 1} (initial seed)",
+                "notes": None,
+                "modified_by": "initial_gen",
+            })
+
+        self.db_manager.set_current_plan_id(plan_id)
         self.check_for_plans()
 
+    # --- Settings ---
+
+    def _apply_planner_config_from_db(self):
+        """Read DB settings and push to CalendarView/AI planner."""
+        mode = (self.db_manager.get_setting("planner_mode") or "heuristic").lower()
+        key = self.db_manager.get_setting("openai_api_key")
+        use_openai = (mode == "openai" and bool(key))
+        self.calendar_view.configure_planner(use_openai=use_openai, api_key=key)
+
     def show_settings(self):
-        """Show settings dialog"""
-        msg = QMessageBox()
-        msg.setWindowTitle("Settings")
-        msg.setText("Settings dialog coming soon!")
-        msg.exec()
+        dlg = SettingsDialog(self, db_manager=self.db_manager)
+        if dlg.exec():
+            # When saved, re-read and apply
+            self._apply_planner_config_from_db()
+            QMessageBox.information(self, "Settings", "Settings saved.")
 
     def apply_styles(self):
-        """Apply custom styles"""
         self.setStyleSheet("""
-            QMainWindow {
-                background-color: #f5f7fa;
-            }
-
-            QWidget#header {
-                background-color: #2c3e50;
-            }
-
-            QLabel#title {
-                color: white;
-                font-size: 24px;
-                font-weight: bold;
-            }
-
-            QPushButton {
-                background-color: #3498db;
-                color: white;
-                border: none;
-                border-radius: 6px;
-                padding: 10px 20px;
-                font-size: 14px;
-                font-weight: 500;
-            }
-
-            QPushButton:hover {
-                background-color: #2980b9;
-            }
-
-            QPushButton:pressed {
-                background-color: #21618c;
-            }
-
-            QPushButton#headerButton {
-                background-color: white;
-                color: #2c3e50;
-                border: 1px solid rgba(255, 255, 255, 0.3);
-            }
-
-            QPushButton#headerButton:hover {
-                background-color: #ecf0f1;
-            }
+            QMainWindow { background-color: #f5f7fa; }
+            QWidget#header { background-color: #2c3e50; }
+            QLabel#title { color: white; font-size: 24px; font-weight: bold; }
+            QPushButton { background-color: #3498db; color: white; border: none; border-radius: 6px;
+                          padding: 10px 20px; font-size: 14px; font-weight: 500; }
+            QPushButton:hover { background-color: #2980b9; }
+            QPushButton:pressed { background-color: #21618c; }
+            QPushButton#headerButton { background-color: white; color: #2c3e50; border: 1px solid rgba(255,255,255,0.3); }
+            QPushButton#headerButton:hover { background-color: #ecf0f1; }
         """)

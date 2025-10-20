@@ -1,12 +1,22 @@
-# Python
+# ==========================
+# Python / PyQt Project .gitignore
+# ==========================
+
+# --- Python build / bytecode ---
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
 .Python
+
+# --- Virtual environments ---
 env/
 venv/
 ENV/
+.venv/
+pip-wheel-metadata/
+
+# --- Build / distribution ---
 build/
 develop-eggs/
 dist/
@@ -23,26 +33,66 @@ wheels/
 .installed.cfg
 *.egg
 
-# Database (don't commit user data)
+# --- Logs / coverage / temp ---
+*.log
+*.pot
+*.mo
+*.tmp
+*.bak
+*.orig
+.coverage
+.tox/
+.nox/
+.pytest_cache/
+htmlcov/
+
+# --- Databases ---
 *.db
 *.sqlite
 *.sqlite3
 
-# IDE
+# --- Qt / PySide / PyQt ---
+*.pyc
+*.qmlc
+*.qrc
+*.qrc.py
+*.ui~
+*_rc.py
+# optional: ignore generated .ui python converters
+ui_*.py
+
+# --- IDEs / Editors ---
 .idea/
 .vscode/
 *.swp
 *.swo
 *~
+.project
+.pydevproject
+.settings/
+.spyproject/
 
-# OS
+# --- OS / System ---
 .DS_Store
+.DS_Store?
 Thumbs.db
 desktop.ini
+$RECYCLE.BIN/
 
-# Environment variables
+# --- Environment variables / keys ---
 .env
-.env.local
+.env.*
+!.env.example
 
-# PyInstaller
+# --- Packaging / installers ---
 *.spec
+MANIFEST
+
+# --- Jupyter / notebooks ---
+.ipynb_checkpoints/
+
+# --- Misc / temporary ---
+.cache/
+*.log
+*.bak
+*.tmp

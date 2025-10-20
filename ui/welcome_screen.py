@@ -1,11 +1,15 @@
 """Welcome Screen Widget"""
 
-from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-                               QPushButton, QFrame)
+from PySide6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFrame
+)
 from PySide6.QtCore import Qt, Signal
 
+
 class WelcomeScreen(QWidget):
-    create_plan_clicked = Signal()  # Changed from pyqtSignal to Signal
+    # Signals
+    create_plan_requested = Signal()
+    import_plan_requested = Signal()  # optional: for future "Import Existing Plan"
 
     def __init__(self):
         super().__init__()
@@ -41,25 +45,21 @@ class WelcomeScreen(QWidget):
 
         # Feature cards
         feature1 = self.create_feature_card(
-            "📅",
-            "Smart Calendar",
+            "📅", "Smart Calendar",
             "Adaptive training plans that adjust to your progress"
         )
         feature2 = self.create_feature_card(
-            "🤖",
-            "AI Coaching",
+            "🤖", "AI Coaching",
             "Personalized guidance from OpenAI-powered coach"
         )
         feature3 = self.create_feature_card(
-            "📊",
-            "Progress Tracking",
+            "📊", "Progress Tracking",
             "Real-time goal attainability and recommendations"
         )
 
         features.addWidget(feature1)
         features.addWidget(feature2)
         features.addWidget(feature3)
-
         content_layout.addLayout(features)
 
         # Call to action
@@ -70,15 +70,15 @@ class WelcomeScreen(QWidget):
         create_btn = QPushButton("Create Your First Training Plan")
         create_btn.setObjectName("ctaButton")
         create_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        create_btn.clicked.connect(self.create_plan_clicked.emit)
+        create_btn.clicked.connect(self.create_plan_requested.emit)
 
         import_btn = QPushButton("Import Existing Plan")
         import_btn.setObjectName("secondaryButton")
         import_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        import_btn.clicked.connect(self.import_plan_requested.emit)
 
         cta_layout.addWidget(create_btn)
         cta_layout.addWidget(import_btn)
-
         content_layout.addLayout(cta_layout)
 
         content.setLayout(content_layout)
@@ -127,36 +127,30 @@ class WelcomeScreen(QWidget):
                 color: #2c3e50;
                 font-weight: bold;
             }
-
             QLabel#welcomeSubtitle {
                 font-size: 20px;
                 color: #7f8c8d;
                 margin-bottom: 24px;
             }
-
             QFrame#featureCard {
                 background-color: white;
                 border-radius: 12px;
                 padding: 24px;
                 min-width: 200px;
             }
-
             QLabel#featureIcon {
                 font-size: 48px;
             }
-
             QLabel#featureTitle {
                 font-size: 20px;
                 color: #2c3e50;
                 font-weight: bold;
             }
-
             QLabel#featureDescription {
                 font-size: 14px;
                 color: #7f8c8d;
                 line-height: 1.6;
             }
-
             QPushButton#ctaButton {
                 background-color: #3498db;
                 color: white;
@@ -167,11 +161,9 @@ class WelcomeScreen(QWidget):
                 font-weight: 500;
                 min-width: 300px;
             }
-
             QPushButton#ctaButton:hover {
                 background-color: #2980b9;
             }
-
             QPushButton#secondaryButton {
                 background-color: transparent;
                 color: #3498db;
@@ -179,7 +171,6 @@ class WelcomeScreen(QWidget):
                 padding: 8px 16px;
                 font-size: 14px;
             }
-
             QPushButton#secondaryButton:hover {
                 background-color: rgba(52, 152, 219, 0.1);
             }
