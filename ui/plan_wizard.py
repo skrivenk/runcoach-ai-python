@@ -1,599 +1,317 @@
-"""Plan Creation Wizard"""
+# ui/plan_wizard.py
+from __future__ import annotations
 
-from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
-                               QPushButton, QStackedWidget, QWidget, QFrame,
-                               QRadioButton, QButtonGroup, QDateEdit, QSpinBox,
-                               QComboBox, QLineEdit, QCheckBox, QDoubleSpinBox,
-                               QTextEdit)
-from PySide6.QtCore import Qt, QDate, Signal
-from PySide6.QtGui import QCursor
-from datetime import datetime, timedelta
+from dataclasses import dataclass
+from typing import Optional
+
+from PySide6.QtCore import Qt, Signal, QDate
+from PySide6.QtWidgets import (
+    QDialog, QTabWidget, QWidget, QVBoxLayout, QFormLayout, QHBoxLayout, QLabel,
+    QLineEdit, QComboBox, QDateEdit, QSpinBox, QDoubleSpinBox, QCheckBox,
+    QDialogButtonBox, QMessageBox, QTimeEdit
+)
+from PySide6.QtGui import QIntValidator
+
+
+@dataclass
+class GoalPreset:
+    duration_weeks: int
+    max_days_per_week: int
+    long_run_day: str
+
+
+GOAL_PRESETS = {
+    "general":  GoalPreset(duration_weeks=8,  max_days_per_week=4, long_run_day="Sunday"),
+    "5k":       GoalPreset(duration_weeks=8,  max_days_per_week=4, long_run_day="Sunday"),
+    "10k":      GoalPreset(duration_weeks=10, max_days_per_week=4, long_run_day="Sunday"),
+    "half":     GoalPreset(duration_weeks=12, max_days_per_week=5, long_run_day="Sunday"),
+    "marathon": GoalPreset(duration_weeks=16, max_days_per_week=5, long_run_day="Sunday"),
+}
 
 
 class PlanWizard(QDialog):
-    """Multi-step wizard for creating training plans"""
-
+    """
+    Simple 3-tab wizard:
+      - Basics (name, goal, dates, duration)
+      - Constraints (days/week, long run day, caps, guardrails)
+      - Baseline (optional seed run)
+    Emits: plan_created(dict)
+    """
     plan_created = Signal(dict)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Create Training Plan")
         self.setModal(True)
-        self.resize(700, 600)
+        self.resize(600, 520)
 
-        # Store wizard data
-        self.plan_data = {}
+        self.tabs = QTabWidget(self)
+        self._build_basics_tab()
+        self._build_constraints_tab()
+        self._build_baseline_tab()
 
-        self.init_ui()
-        self.apply_styles()
+        # Dialog buttons
+        self.buttons = QDialogButtonBox(QDialogButtonBox.Cancel | QDialogButtonBox.Ok)
+        self.buttons.rejected.connect(self.reject)
+        self.buttons.accepted.connect(self._on_accept)
 
-    def init_ui(self):
-        """Initialize the wizard UI"""
-        layout = QVBoxLayout()
-        layout.setContentsMargins(0, 0, 0, 0)
+        # Layout
+        root = QVBoxLayout(self)
+        root.addWidget(self.tabs)
+        root.addWidget(self.buttons)
 
-        # Header
-        header = self.create_header()
-        layout.addWidget(header)
+        # Initial validation
+        self._apply_goal_preset()
+        self._validate_all()
 
-        # Stacked widget for wizard pages
-        self.stack = QStackedWidget()
+    # ---------- Tabs ----------
 
-        # Create wizard pages
-        self.page_goal = self.create_goal_page()
-        self.page_timeline = self.create_timeline_page()
-        self.page_baseline = self.create_baseline_page()
-        self.page_schedule = self.create_schedule_page()
-        self.page_guardrails = self.create_guardrails_page()
-        self.page_review = self.create_review_page()
+    def _build_basics_tab(self):
+        w = QWidget()
+        form = QFormLayout(w)
+        form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
 
-        self.stack.addWidget(self.page_goal)
-        self.stack.addWidget(self.page_timeline)
-        self.stack.addWidget(self.page_baseline)
-        self.stack.addWidget(self.page_schedule)
-        self.stack.addWidget(self.page_guardrails)
-        self.stack.addWidget(self.page_review)
+        # Name
+        self.name_edit = QLineEdit()
+        self.name_edit.setPlaceholderText("e.g., Fall Half Marathon 2025")
+        self.name_edit.textChanged.connect(self._validate_all)
 
-        layout.addWidget(self.stack)
-
-        # Footer with navigation
-        footer = self.create_footer()
-        layout.addWidget(footer)
-
-        self.setLayout(layout)
-
-        # Update navigation buttons
-        self.update_navigation()
-
-    def create_header(self) -> QWidget:
-        """Create wizard header"""
-        header = QFrame()
-        header.setObjectName("wizardHeader")
-
-        layout = QVBoxLayout()
-
-        self.title_label = QLabel("Step 1: Choose Your Goal")
-        self.title_label.setObjectName("wizardTitle")
-
-        self.subtitle_label = QLabel("Select what you're training for")
-        self.subtitle_label.setObjectName("wizardSubtitle")
-
-        layout.addWidget(self.title_label)
-        layout.addWidget(self.subtitle_label)
-
-        header.setLayout(layout)
-        return header
-
-    def create_footer(self) -> QWidget:
-        """Create wizard footer with navigation"""
-        footer = QFrame()
-        footer.setObjectName("wizardFooter")
-
-        layout = QHBoxLayout()
-
-        self.back_btn = QPushButton("← Back")
-        self.back_btn.setObjectName("secondaryButton")
-        self.back_btn.clicked.connect(self.previous_page)
-
-        layout.addWidget(self.back_btn)
-        layout.addStretch()
-
-        self.next_btn = QPushButton("Next →")
-        self.next_btn.setObjectName("primaryButton")
-        self.next_btn.clicked.connect(self.next_page)
-
-        self.create_btn = QPushButton("Create Plan")
-        self.create_btn.setObjectName("primaryButton")
-        self.create_btn.clicked.connect(self.create_plan)
-        self.create_btn.hide()
-
-        layout.addWidget(self.next_btn)
-        layout.addWidget(self.create_btn)
-
-        footer.setLayout(layout)
-        return footer
-
-    # ========================================
-    # WIZARD PAGES
-    # ========================================
-
-    def create_goal_page(self) -> QWidget:
-        """Page 1: Goal Selection"""
-        page = QWidget()
-        layout = QVBoxLayout()
-        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-        layout.setSpacing(16)
-
-        # Goal options
-        self.goal_group = QButtonGroup()
-
-        goals = [
-            ("5K", "5 kilometer race (3.1 miles)"),
-            ("10K", "10 kilometer race (6.2 miles)"),
-            ("half", "Half Marathon (13.1 miles)"),
-            ("marathon", "Marathon (26.2 miles)"),
-            ("fitness", "General Fitness - Build aerobic base"),
-            ("maintenance", "Maintenance - Keep current fitness level")
-        ]
-
-        for i, (value, description) in enumerate(goals):
-            radio = QRadioButton(description)
-            radio.setProperty("goal_value", value)
-            self.goal_group.addButton(radio, i)
-            layout.addWidget(radio)
-
-        # Set default
-        self.goal_group.button(0).setChecked(True)
-
-        layout.addStretch()
-        page.setLayout(layout)
-        return page
-
-    def create_timeline_page(self) -> QWidget:
-        """Page 2: Timeline"""
-        page = QWidget()
-        layout = QVBoxLayout()
-        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-        layout.setSpacing(24)
+        # Goal
+        self.goal_combo = QComboBox()
+        self.goal_combo.addItems(["general", "5k", "10k", "half", "marathon"])
+        self.goal_combo.currentIndexChanged.connect(self._apply_goal_preset)
 
         # Start date
-        start_layout = QHBoxLayout()
-        start_label = QLabel("Start Date:")
-        start_label.setFixedWidth(150)
         self.start_date = QDateEdit()
-        self.start_date.setDate(QDate.currentDate())
         self.start_date.setCalendarPopup(True)
-        start_layout.addWidget(start_label)
-        start_layout.addWidget(self.start_date)
-        start_layout.addStretch()
-        layout.addLayout(start_layout)
+        self.start_date.setDate(QDate.currentDate())
+        self.start_date.dateChanged.connect(self._sync_dates_and_validate)
 
-        # Race date OR duration
-        race_label = QLabel("Choose one:")
-        race_label.setObjectName("sectionLabel")
-        layout.addWidget(race_label)
-
-        # Race date option
-        race_layout = QHBoxLayout()
-        self.has_race_date = QCheckBox("I have a race date:")
-        self.has_race_date.setChecked(True)
+        # Race date (optional)
         self.race_date = QDateEdit()
-        self.race_date.setDate(QDate.currentDate().addDays(84))  # 12 weeks
         self.race_date.setCalendarPopup(True)
-        self.has_race_date.toggled.connect(lambda checked: self.race_date.setEnabled(checked))
-        race_layout.addWidget(self.has_race_date)
-        race_layout.addWidget(self.race_date)
-        race_layout.addStretch()
-        layout.addLayout(race_layout)
+        self.race_date.setSpecialValueText("—")
+        self.race_date.setDate(QDate.currentDate().addDays(7))
+        self.race_date.dateChanged.connect(self._sync_dates_and_validate)
 
-        # Duration option
-        duration_layout = QHBoxLayout()
-        self.has_duration = QCheckBox("Train for a specific duration:")
+        # Duration (weeks)
         self.duration_weeks = QSpinBox()
-        self.duration_weeks.setRange(4, 52)
-        self.duration_weeks.setValue(12)
-        self.duration_weeks.setSuffix(" weeks")
-        self.duration_weeks.setEnabled(False)
-        self.has_duration.toggled.connect(lambda checked: self.duration_weeks.setEnabled(checked))
-        self.has_duration.toggled.connect(lambda checked: self.has_race_date.setChecked(not checked))
-        duration_layout.addWidget(self.has_duration)
-        duration_layout.addWidget(self.duration_weeks)
-        duration_layout.addStretch()
-        layout.addLayout(duration_layout)
+        self.duration_weeks.setRange(1, 52)
+        self.duration_weeks.valueChanged.connect(self._validate_all)
 
-        layout.addStretch()
-        page.setLayout(layout)
-        return page
+        form.addRow("Plan name", self.name_edit)
+        form.addRow("Goal type", self.goal_combo)
+        form.addRow("Start date", self.start_date)
+        form.addRow("Race date (optional)", self.race_date)
+        form.addRow("Duration (weeks)", self.duration_weeks)
 
-    def create_baseline_page(self) -> QWidget:
-        """Page 3: Baseline Fitness"""
-        page = QWidget()
-        layout = QVBoxLayout()
-        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-        layout.setSpacing(24)
+        self.tabs.addTab(w, "Basics")
 
-        # Baseline selection
-        baseline_label = QLabel("How would you like to set your baseline?")
-        baseline_label.setObjectName("sectionLabel")
-        layout.addWidget(baseline_label)
+    def _build_constraints_tab(self):
+        w = QWidget()
+        form = QFormLayout(w)
+        form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
 
-        self.baseline_group = QButtonGroup()
+        # Max days/week
+        self.max_days = QSpinBox()
+        self.max_days.setRange(1, 7)
+        self.max_days.valueChanged.connect(self._validate_all)
 
-        single_run = QRadioButton("Single recent run + self-assessment")
-        single_run.setChecked(True)
-        self.baseline_group.addButton(single_run, 0)
-        layout.addWidget(single_run)
+        # Long run day
+        self.long_day = QComboBox()
+        self.long_day.addItems(["Sunday", "Saturday", "Friday", "Thursday", "Wednesday", "Tuesday", "Monday"])
 
-        multiple_runs = QRadioButton("Analyze last N runs (coming soon)")
-        multiple_runs.setEnabled(False)
-        self.baseline_group.addButton(multiple_runs, 1)
-        layout.addWidget(multiple_runs)
+        # Caps
+        self.weekly_cap = QDoubleSpinBox()
+        self.weekly_cap.setRange(0.00, 1.00)       # 0%..100% (as decimal)
+        self.weekly_cap.setDecimals(2)
+        self.weekly_cap.setSingleStep(0.05)
+        self.weekly_cap.setValue(0.10)
 
-        layout.addSpacing(16)
+        self.long_cap = QDoubleSpinBox()
+        self.long_cap.setRange(0.00, 1.00)
+        self.long_cap.setDecimals(2)
+        self.long_cap.setSingleStep(0.05)
+        self.long_cap.setValue(0.30)
 
-        # Recent run data
-        run_label = QLabel("Recent Run:")
-        run_label.setObjectName("sectionLabel")
-        layout.addWidget(run_label)
+        # Guardrails
+        self.guardrails = QCheckBox("Enable guardrails (safety caps & sensible progress) ")
+        self.guardrails.setChecked(True)
 
-        # Distance
-        dist_layout = QHBoxLayout()
-        dist_label = QLabel("Distance:")
-        dist_label.setFixedWidth(150)
+        form.addRow("Max days per week", self.max_days)
+        form.addRow("Long run day", self.long_day)
+        form.addRow("Weekly increase cap (0.10 = 10%)", self.weekly_cap)
+        form.addRow("Long run cap (0.30 = 30%)", self.long_cap)
+        form.addRow("", self.guardrails)
+
+        self.tabs.addTab(w, "Constraints")
+
+    def _build_baseline_tab(self):
+        w = QWidget()
+        form = QFormLayout(w)
+        form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+
+        self.has_baseline = QCheckBox("I have a recent baseline run")
+        self.has_baseline.toggled.connect(self._toggle_baseline_fields)
+
         self.baseline_distance = QDoubleSpinBox()
-        self.baseline_distance.setRange(0.1, 50.0)
-        self.baseline_distance.setValue(5.0)
-        self.baseline_distance.setSuffix(" miles")
-        self.baseline_distance.setDecimals(1)
-        dist_layout.addWidget(dist_label)
-        dist_layout.addWidget(self.baseline_distance)
-        dist_layout.addStretch()
-        layout.addLayout(dist_layout)
+        self.baseline_distance.setRange(0, 1000)
+        self.baseline_distance.setDecimals(2)
+        self.baseline_distance.setSingleStep(0.25)
+        self.baseline_distance.setEnabled(False)
 
-        # Time
-        time_layout = QHBoxLayout()
-        time_label = QLabel("Time:")
-        time_label.setFixedWidth(150)
-        self.baseline_time = QSpinBox()
-        self.baseline_time.setRange(10, 300)
-        self.baseline_time.setValue(45)
-        self.baseline_time.setSuffix(" minutes")
-        time_layout.addWidget(time_label)
-        time_layout.addWidget(self.baseline_time)
-        time_layout.addStretch()
-        layout.addLayout(time_layout)
+        self.baseline_time = QTimeEdit()
+        self.baseline_time.setDisplayFormat("HH:mm:ss")
+        self.baseline_time.setEnabled(False)
 
-        # RPE
-        rpe_layout = QHBoxLayout()
-        rpe_label = QLabel("Effort (RPE):")
-        rpe_label.setFixedWidth(150)
         self.baseline_rpe = QSpinBox()
         self.baseline_rpe.setRange(1, 10)
         self.baseline_rpe.setValue(6)
-        self.baseline_rpe.setSuffix(" / 10")
-        rpe_layout.addWidget(rpe_label)
-        rpe_layout.addWidget(self.baseline_rpe)
-        rpe_layout.addStretch()
-        layout.addLayout(rpe_layout)
+        self.baseline_rpe.setEnabled(False)
 
-        layout.addStretch()
-        page.setLayout(layout)
-        return page
+        form.addRow(self.has_baseline)
+        form.addRow("Distance (mi)", self.baseline_distance)
+        form.addRow("Time (HH:MM:SS)", self.baseline_time)
+        form.addRow("RPE (1–10)", self.baseline_rpe)
 
-    def create_schedule_page(self) -> QWidget:
-        """Page 4: Schedule Preferences"""
-        page = QWidget()
-        layout = QVBoxLayout()
-        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-        layout.setSpacing(24)
+        hint = QLabel("Tip: Baseline helps the calendar seed early weeks more accurately. You can skip this now.")
+        hint.setWordWrap(True)
+        form.addRow(hint)
 
-        # Max days per week
-        days_layout = QHBoxLayout()
-        days_label = QLabel("Max running days/week:")
-        days_label.setFixedWidth(200)
-        self.max_days = QSpinBox()
-        self.max_days.setRange(3, 7)
-        self.max_days.setValue(5)
-        self.max_days.setSuffix(" days")
-        days_layout.addWidget(days_label)
-        days_layout.addWidget(self.max_days)
-        days_layout.addStretch()
-        layout.addLayout(days_layout)
+        self.tabs.addTab(w, "Baseline")
 
-        # Long run day
-        long_run_layout = QHBoxLayout()
-        long_run_label = QLabel("Preferred long run day:")
-        long_run_label.setFixedWidth(200)
-        self.long_run_day = QComboBox()
-        self.long_run_day.addItems(["Sunday", "Saturday", "Friday", "Thursday", "Wednesday", "Tuesday", "Monday"])
-        long_run_layout.addWidget(long_run_label)
-        long_run_layout.addWidget(self.long_run_day)
-        long_run_layout.addStretch()
-        layout.addLayout(long_run_layout)
+    # ---------- Goal preset & validation ----------
 
-        # Do-not-run days
-        dnr_label = QLabel("Do-not-run days: (coming soon)")
-        dnr_label.setObjectName("sectionLabel")
-        layout.addWidget(dnr_label)
+    def _apply_goal_preset(self):
+        goal = self.goal_combo.currentText().lower()
+        preset = GOAL_PRESETS.get(goal, GOAL_PRESETS["general"])
+        # Only set if the user hasn't edited or we’re switching goals
+        self.duration_weeks.blockSignals(True)
+        self.max_days.blockSignals(True)
+        self.duration_weeks.setValue(preset.duration_weeks)
+        self.max_days.setValue(preset.max_days_per_week)
+        self.max_days.blockSignals(False)
+        self.duration_weeks.blockSignals(False)
 
-        layout.addStretch()
-        page.setLayout(layout)
-        return page
+        idx = self.long_day.findText(preset.long_run_day)
+        if idx >= 0:
+            self.long_day.setCurrentIndex(idx)
 
-    def create_guardrails_page(self) -> QWidget:
-        """Page 5: Safety Guardrails"""
-        page = QWidget()
-        layout = QVBoxLayout()
-        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-        layout.setSpacing(24)
+        self._validate_all()
 
-        # Enable guardrails
-        self.guardrails_enabled = QCheckBox("Enable safety guardrails (recommended)")
-        self.guardrails_enabled.setChecked(True)
-        layout.addWidget(self.guardrails_enabled)
+    def _sync_dates_and_validate(self):
+        # Keep race date >= start date when both set
+        sd = self.start_date.date()
+        rd = self.race_date.date()
+        if rd.isValid() and sd.isValid() and rd < sd:
+            # auto-bump race date to start date
+            self.race_date.blockSignals(True)
+            self.race_date.setDate(sd)
+            self.race_date.blockSignals(False)
+        self._validate_all()
 
-        layout.addSpacing(16)
+    def _toggle_baseline_fields(self, enabled: bool):
+        self.baseline_distance.setEnabled(enabled)
+        self.baseline_time.setEnabled(enabled)
+        self.baseline_rpe.setEnabled(enabled)
 
-        # Weekly increase cap
-        increase_layout = QHBoxLayout()
-        increase_label = QLabel("Weekly mileage increase cap:")
-        increase_label.setFixedWidth(220)
-        self.weekly_increase = QSpinBox()
-        self.weekly_increase.setRange(5, 20)
-        self.weekly_increase.setValue(10)
-        self.weekly_increase.setSuffix("%")
-        increase_layout.addWidget(increase_label)
-        increase_layout.addWidget(self.weekly_increase)
-        increase_layout.addStretch()
-        layout.addLayout(increase_layout)
-
-        # Long run cap
-        long_run_cap_layout = QHBoxLayout()
-        long_run_cap_label = QLabel("Long run cap (% of weekly):")
-        long_run_cap_label.setFixedWidth(220)
-        self.long_run_cap = QSpinBox()
-        self.long_run_cap.setRange(20, 40)
-        self.long_run_cap.setValue(30)
-        self.long_run_cap.setSuffix("%")
-        long_run_cap_layout.addWidget(long_run_cap_label)
-        long_run_cap_layout.addWidget(self.long_run_cap)
-        long_run_cap_layout.addStretch()
-        layout.addLayout(long_run_cap_layout)
-
-        layout.addStretch()
-        page.setLayout(layout)
-        return page
-
-    def create_review_page(self) -> QWidget:
-        """Page 6: Review & Create"""
-        page = QWidget()
-        layout = QVBoxLayout()
-        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-        layout.setSpacing(16)
-
-        review_label = QLabel("Review Your Training Plan:")
-        review_label.setObjectName("sectionLabel")
-        layout.addWidget(review_label)
-
-        self.review_text = QTextEdit()
-        self.review_text.setReadOnly(True)
-        self.review_text.setMaximumHeight(400)
-        layout.addWidget(self.review_text)
-
-        layout.addStretch()
-        page.setLayout(layout)
-        return page
-
-    # ========================================
-    # NAVIGATION
-    # ========================================
-
-    def update_navigation(self):
-        """Update navigation buttons and header"""
-        current_index = self.stack.currentIndex()
-        total_pages = self.stack.count()
-
-        # Update header
-        titles = [
-            ("Step 1: Choose Your Goal", "Select what you're training for"),
-            ("Step 2: Timeline", "When do you start and finish?"),
-            ("Step 3: Baseline Fitness", "Tell us about your current fitness level"),
-            ("Step 4: Schedule", "Set your training schedule preferences"),
-            ("Step 5: Safety Guardrails", "Configure safety limits"),
-            ("Step 6: Review", "Review and create your plan")
-        ]
-
-        self.title_label.setText(titles[current_index][0])
-        self.subtitle_label.setText(titles[current_index][1])
-
-        # Update buttons
-        self.back_btn.setEnabled(current_index > 0)
-
-        if current_index == total_pages - 1:
-            # Last page - show Create button
-            self.next_btn.hide()
-            self.create_btn.show()
-            self.update_review()
-        else:
-            self.next_btn.show()
-            self.create_btn.hide()
-
-    def previous_page(self):
-        """Go to previous page"""
-        current = self.stack.currentIndex()
-        if current > 0:
-            self.stack.setCurrentIndex(current - 1)
-            self.update_navigation()
-
-    def next_page(self):
-        """Go to next page"""
-        current = self.stack.currentIndex()
-        if current < self.stack.count() - 1:
-            self.stack.setCurrentIndex(current + 1)
-            self.update_navigation()
-
-    def update_review(self):
-        """Update the review page with plan summary"""
-        # Get selected goal
-        goal_button = self.goal_group.checkedButton()
-        goal_value = goal_button.property("goal_value")
-        goal_text = goal_button.text()
-
-        # Get timeline
-        start = self.start_date.date().toString("MM/dd/yyyy")
-        if self.has_race_date.isChecked():
-            race = self.race_date.date().toString("MM/dd/yyyy")
-            timeline = f"Start: {start}\nRace Date: {race}"
-        else:
-            duration = self.duration_weeks.value()
-            timeline = f"Start: {start}\nDuration: {duration} weeks"
-
-        # Build summary
-        summary = f"""
-<h3>Goal</h3>
-<p>{goal_text}</p>
-
-<h3>Timeline</h3>
-<p>{timeline.replace(chr(10), '<br>')}</p>
-
-<h3>Baseline Fitness</h3>
-<p>Recent run: {self.baseline_distance.value()} miles in {self.baseline_time.value()} minutes (RPE: {self.baseline_rpe.value()}/10)</p>
-
-<h3>Schedule</h3>
-<p>Max {self.max_days.value()} running days per week<br>
-Long run on {self.long_run_day.currentText()}</p>
-
-<h3>Safety Settings</h3>
-<p>Guardrails: {'Enabled' if self.guardrails_enabled.isChecked() else 'Disabled'}<br>
-Weekly increase cap: {self.weekly_increase.value()}%<br>
-Long run cap: {self.long_run_cap.value()}% of weekly mileage</p>
+    def _validate_all(self) -> bool:
         """
+        Returns True if all required fields are valid; also updates UI hints.
+        """
+        errors = []
 
-        self.review_text.setHtml(summary)
+        # Name
+        name = self.name_edit.text().strip()
+        if not name:
+            errors.append("Please enter a plan name.")
 
-    def create_plan(self):
-        """Collect data and create the plan"""
-        # Get selected goal
-        goal_button = self.goal_group.checkedButton()
-        goal_value = goal_button.property("goal_value")
+        # Dates
+        sd = self.start_date.date()
+        rd = self.race_date.date()
+        if not sd.isValid():
+            errors.append("Start date is invalid.")
+        if rd.isValid() and rd < sd:
+            errors.append("Race date must be on/after the start date.")
 
-        # Build plan data
-        self.plan_data = {
-            'name': f"{goal_button.text().split(' -')[0]} Training Plan",
-            'goal_type': goal_value,
-            'start_date': self.start_date.date().toString("yyyy-MM-dd"),
-            'max_days_per_week': self.max_days.value(),
-            'long_run_day': self.long_run_day.currentText(),
-            'weekly_increase_cap': self.weekly_increase.value() / 100.0,
-            'long_run_cap': self.long_run_cap.value() / 100.0,
-            'guardrails_enabled': self.guardrails_enabled.isChecked(),
-            'baseline_distance': self.baseline_distance.value(),
-            'baseline_time': self.baseline_time.value() * 60,  # Convert to seconds
-            'baseline_rpe': self.baseline_rpe.value()
-        }
+        # Duration
+        if self.duration_weeks.value() <= 0:
+            errors.append("Duration must be at least 1 week.")
 
-        # Add race date or duration
-        if self.has_race_date.isChecked():
-            self.plan_data['race_date'] = self.race_date.date().toString("yyyy-MM-dd")
-            # Calculate duration
-            start = self.start_date.date()
-            race = self.race_date.date()
-            days = start.daysTo(race)
-            self.plan_data['duration_weeks'] = max(4, days // 7)
-        else:
-            self.plan_data['duration_weeks'] = self.duration_weeks.value()
-            self.plan_data['race_date'] = None
+        # Max days/week
+        if not (1 <= self.max_days.value() <= 7):
+            errors.append("Max days per week must be between 1 and 7.")
 
-        # Emit signal and close
-        self.plan_created.emit(self.plan_data)
+        # Caps
+        if not (0.0 <= self.weekly_cap.value() <= 1.0):
+            errors.append("Weekly increase cap must be between 0.00 and 1.00.")
+        if not (0.0 <= self.long_cap.value() <= 1.0):
+            errors.append("Long run cap must be between 0.00 and 1.00.")
+
+        # Baseline (if enabled)
+        if self.has_baseline.isChecked():
+            if self.baseline_distance.value() <= 0:
+                errors.append("Baseline distance must be > 0 if baseline is enabled.")
+            # time can be 00:00:00 but warn if both are zero
+            t = self._time_to_seconds(self.baseline_time.time())
+            if t <= 0:
+                errors.append("Baseline time must be > 0 if baseline is enabled.")
+
+        # Enable/disable OK button
+        ok_btn = self.buttons.button(QDialogButtonBox.Ok)
+        ok_btn.setEnabled(len(errors) == 0)
+        return len(errors) == 0
+
+    @staticmethod
+    def _time_to_seconds(t) -> int:
+        return t.hour() * 3600 + t.minute() * 60 + t.second()
+
+    # ---------- Accept / Emit ----------
+
+    def _on_accept(self):
+        if not self._validate_all():
+            QMessageBox.warning(self, "Fix issues", "Please correct the highlighted issues and try again.")
+            # keep user on the faulty tab if we wanted; for now, just block accept
+            return
+
+        data = self._collect_payload()
+        self.plan_created.emit(data)
         self.accept()
 
-    def apply_styles(self):
-        """Apply custom styles"""
-        self.setStyleSheet("""
-            QDialog {
-                background-color: #f5f7fa;
-            }
+    def _collect_payload(self) -> dict:
+        """
+        Build the plan payload + baseline keys exactly as MainWindow.on_plan_created expects.
+        """
+        name = self.name_edit.text().strip()
+        goal = self.goal_combo.currentText().lower()
 
-            QFrame#wizardHeader {
-                background-color: #2c3e50;
-                padding: 24px;
-            }
+        sd: QDate = self.start_date.date()
+        start_str = sd.toString("yyyy-MM-dd")
 
-            QLabel#wizardTitle {
-                color: white;
-                font-size: 24px;
-                font-weight: bold;
-            }
+        rd: QDate = self.race_date.date()
+        race_str = rd.toString("yyyy-MM-dd") if rd.isValid() else None
 
-            QLabel#wizardSubtitle {
-                color: #ecf0f1;
-                font-size: 14px;
-                margin-top: 4px;
-            }
+        payload = {
+            "name": name,
+            "goal_type": goal,
+            "start_date": start_str,
+            "race_date": race_str,
+            "duration_weeks": int(self.duration_weeks.value()),
+            "max_days_per_week": int(self.max_days.value()),
+            "long_run_day": self.long_day.currentText(),
+            "weekly_increase_cap": float(self.weekly_cap.value()),
+            "long_run_cap": float(self.long_cap.value()),
+            "guardrails_enabled": bool(self.guardrails.isChecked()),
+        }
 
-            QLabel#sectionLabel {
-                font-size: 16px;
-                font-weight: 600;
-                color: #2c3e50;
-                margin-top: 8px;
-            }
+        # Optional baseline used by on_plan_created; include even if None for simplicity
+        if self.has_baseline.isChecked():
+            payload["baseline_distance"] = float(self.baseline_distance.value())
+            payload["baseline_time"] = int(self._time_to_seconds(self.baseline_time.time()))
+            payload["baseline_rpe"] = int(self.baseline_rpe.value())
+        else:
+            payload["baseline_distance"] = None
+            payload["baseline_time"] = None
+            payload["baseline_rpe"] = None
 
-            QFrame#wizardFooter {
-                background-color: white;
-                padding: 16px 24px;
-                border-top: 1px solid #ecf0f1;
-            }
-
-            QPushButton#primaryButton {
-                background-color: #3498db;
-                color: white;
-                border: none;
-                border-radius: 6px;
-                padding: 12px 24px;
-                font-size: 14px;
-                font-weight: 500;
-                min-width: 120px;
-            }
-
-            QPushButton#primaryButton:hover {
-                background-color: #2980b9;
-            }
-
-            QPushButton#secondaryButton {
-                background-color: white;
-                color: #7f8c8d;
-                border: 1px solid #bdc3c7;
-                border-radius: 6px;
-                padding: 12px 24px;
-                font-size: 14px;
-            }
-
-            QPushButton#secondaryButton:hover {
-                background-color: #ecf0f1;
-            }
-
-            QPushButton#secondaryButton:disabled {
-                opacity: 0.5;
-            }
-
-            QRadioButton, QCheckBox {
-                font-size: 14px;
-                padding: 8px;
-            }
-
-            QSpinBox, QDoubleSpinBox, QComboBox, QDateEdit {
-                padding: 8px;
-                border: 1px solid #bdc3c7;
-                border-radius: 4px;
-                background: white;
-                min-width: 150px;
-            }
-
-            QTextEdit {
-                border: 1px solid #bdc3c7;
-                border-radius: 4px;
-                padding: 12px;
-                background: white;
-            }
-        """)
+        return payload
