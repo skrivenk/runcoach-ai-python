@@ -2,7 +2,7 @@
 
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QStackedWidget, QMessageBox
+    QStackedWidget, QMessageBox, QFileDialog
 )
 from PySide6.QtCore import Qt, QSettings
 
@@ -17,23 +17,17 @@ class MainWindow(QMainWindow):
         self.current_plan = None
 
         self.setWindowTitle("🏃 RunCoach AI")
-        # Allow smaller windows than before
         self.setMinimumSize(960, 640)
         self.resize(1200, 800)
 
         self.init_ui()
         self.apply_styles()
-
-        # Restore geometry/state after widgets exist
         self.restore_window_geometry()
-
-        # Decide which screen to show
         self.check_for_plans()
 
     # ---------- UI ----------
 
     def init_ui(self):
-        """Initialize the user interface."""
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
 
@@ -54,13 +48,12 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.calendar_view)
         main_layout.addWidget(self.stack)
 
-        # Signals (handle either signal name the Welcome screen might expose)
+        # Signals
         if hasattr(self.welcome_screen, "create_plan_clicked"):
             self.welcome_screen.create_plan_clicked.connect(self.show_plan_wizard)
         if hasattr(self.welcome_screen, "create_plan_requested"):
             self.welcome_screen.create_plan_requested.connect(self.show_plan_wizard)
         if hasattr(self.welcome_screen, "import_plan_requested"):
-            # Optional: implement when import dialog exists
             self.welcome_screen.import_plan_requested.connect(self.show_import_dialog)
 
         central_widget.setLayout(main_layout)
@@ -78,6 +71,17 @@ class MainWindow(QMainWindow):
         layout.addWidget(title)
         layout.addStretch()
 
+        # Export / Import buttons
+        export_btn = QPushButton("Export")
+        export_btn.setObjectName("headerButton")
+        export_btn.clicked.connect(self.show_export_dialog)
+        layout.addWidget(export_btn)
+
+        import_btn = QPushButton("Import")
+        import_btn.setObjectName("headerButton")
+        import_btn.clicked.connect(self.show_import_dialog)
+        layout.addWidget(import_btn)
+
         settings_btn = QPushButton("Settings")
         settings_btn.setObjectName("headerButton")
         settings_btn.clicked.connect(self.show_settings)
@@ -89,7 +93,6 @@ class MainWindow(QMainWindow):
     # ---------- Plan routing ----------
 
     def _get_current_plan_id(self) -> int | None:
-        """Read current plan id from app_settings (string -> int)."""
         val = self.db_manager.get_setting("current_plan_id")
         if not val:
             return None
@@ -102,10 +105,8 @@ class MainWindow(QMainWindow):
         self.db_manager.set_setting("current_plan_id", str(pid))
 
     def check_for_plans(self):
-        """Decide which view to show based on stored/current plan."""
         pid = self._get_current_plan_id()
         if not pid:
-            # No selected plan; try to auto-pick the most recent
             plans = self.db_manager.get_all_plans()
             if plans:
                 pid = plans[0]["id"]
@@ -127,7 +128,6 @@ class MainWindow(QMainWindow):
     # ---------- Plan creation ----------
 
     def show_plan_wizard(self):
-        """Show the plan creation wizard."""
         try:
             from ui.plan_wizard import PlanWizard
         except Exception as e:
@@ -139,10 +139,9 @@ class MainWindow(QMainWindow):
         wizard.exec()
 
     def on_plan_created(self, plan_data: dict):
-        # 1) create plan
         plan_id = self.db_manager.create_plan(plan_data)
 
-        # 2) (optional) baseline run if your DB supports it; wrap in try in case not present
+        # Optional baseline (ignore if not implemented)
         try:
             baseline = {
                 "plan_id": plan_id,
@@ -157,9 +156,9 @@ class MainWindow(QMainWindow):
             if baseline["distance"] is not None:
                 self.db_manager.create_baseline_run(baseline)
         except Exception:
-            pass  # baseline is optional
+            pass
 
-        # 3) seed a simple first week so calendar isn't empty
+        # Seed a simple first week
         from datetime import datetime, timedelta
         start_dt = datetime.fromisoformat(plan_data["start_date"])
         for i in range(7):
@@ -174,22 +173,50 @@ class MainWindow(QMainWindow):
                 "modified_by": "initial_gen",
             })
 
-        # 4) remember + show calendar
         self._set_current_plan_id(plan_id)
         self.check_for_plans()
 
-    # ---------- Stubs / dialogs ----------
+    # ---------- Import / Export ----------
+
+    def show_export_dialog(self):
+        pid = self._get_current_plan_id()
+        if not pid:
+            QMessageBox.information(self, "Export", "No plan to export.")
+            return
+
+        filename, _ = QFileDialog.getSaveFileName(
+            self, "Export Plan", "runcoach_plan.json", "JSON Files (*.json)"
+        )
+        if not filename:
+            return
+
+        try:
+            self.db_manager.export_plan_to_file(pid, filename)
+            QMessageBox.information(self, "Export", "Plan exported successfully.")
+        except Exception as e:
+            QMessageBox.critical(self, "Export Failed", str(e))
 
     def show_import_dialog(self):
-        QMessageBox.information(self, "Import", "Import dialog coming soon.")
+        filename, _ = QFileDialog.getOpenFileName(
+            self, "Import Plan", "", "JSON Files (*.json)"
+        )
+        if not filename:
+            return
+
+        try:
+            new_plan_id = self.db_manager.import_plan_from_file(filename)
+            self._set_current_plan_id(new_plan_id)
+            self.check_for_plans()
+            QMessageBox.information(self, "Import", "Plan imported successfully.")
+        except Exception as e:
+            QMessageBox.critical(self, "Import Failed", str(e))
+
+    # ---------- Settings / Window ----------
 
     def show_settings(self):
         QMessageBox.information(self, "Settings", "Settings dialog coming soon!")
 
-    # ---------- Window state persistence ----------
-
     def restore_window_geometry(self):
-        """Restore window geometry/state from QSettings."""
         s = QSettings()
         geo = s.value("mainWindow/geometry", None)
         state = s.value("mainWindow/state", None)
@@ -199,7 +226,6 @@ class MainWindow(QMainWindow):
             self.restoreState(state)
 
     def closeEvent(self, event):
-        """Persist geometry/state on close."""
         s = QSettings()
         s.setValue("mainWindow/geometry", self.saveGeometry())
         s.setValue("mainWindow/state", self.saveState())
