@@ -35,29 +35,58 @@ WEEKDAY_ORDER = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday
 
 
 class AIPlanner:
-    def __init__(self):
+    """
+    Planner facade with two modes:
+      - Heuristic (offline) — default
+      - OpenAI (optional)  — requires api key + openai installed
+    """
+
+    def __init__(self, use_openai: bool = False, api_key: Optional[str] = None):
         self._use_openai = False
         self._openai = None
-        key = os.getenv("OPENAI_API_KEY")
-        if key:
+        self._api_key = None
+        self.set_config(use_openai, api_key)
+
+    # --- Public configuration API ---
+
+    def set_config(self, use_openai: bool, api_key: Optional[str]):
+        """Enable/disable OpenAI mode at runtime. Falls back to heuristic if unavailable."""
+        self._use_openai = False
+        self._openai = None
+        self._api_key = api_key or os.getenv("OPENAI_API_KEY") or None
+
+        if use_openai and self._api_key:
             try:
                 import openai  # type: ignore
+                openai.api_key = self._api_key
                 self._openai = openai
-                self._openai.api_key = key
-                self._use_openai = False  # flip to True later if you want live calls
+                self._use_openai = True
             except Exception:
+                # If import fails or anything else goes wrong, stay heuristic.
                 self._openai = None
                 self._use_openai = False
 
-    def plan_week(self, plan: PlanContext, week_dates: List[str], recent_workouts: List[Dict]) -> List[WorkoutSuggestion]:
+    # --- Plan API ---
+
+    def plan_week(
+        self,
+        plan: PlanContext,
+        week_dates: List[str],
+        recent_workouts: List[Dict],
+    ) -> List[WorkoutSuggestion]:
         if self._use_openai and self._openai:
             try:
                 return self._plan_week_with_openai(plan, week_dates, recent_workouts)
             except Exception:
-                pass
+                # Fallback if API call fails
+                return self._plan_week_heuristic(plan, week_dates, recent_workouts)
         return self._plan_week_heuristic(plan, week_dates, recent_workouts)
 
-    def _plan_week_heuristic(self, plan: PlanContext, week_dates: List[str], recent_workouts: List[Dict]) -> List[WorkoutSuggestion]:
+    # --- Heuristic planner ---
+
+    def _plan_week_heuristic(
+        self, plan: PlanContext, week_dates: List[str], recent_workouts: List[Dict]
+    ) -> List[WorkoutSuggestion]:
         try:
             sd = datetime.fromisoformat(plan.start_date).date()
             wd0 = datetime.fromisoformat(week_dates[0]).date()
@@ -114,6 +143,10 @@ class AIPlanner:
         idx = WEEKDAY_ORDER.index(day)
         return WEEKDAY_ORDER[(idx + offset) % 7]
 
-    def _plan_week_with_openai(self, plan: PlanContext, week_dates: List[str], recent_workouts: List[Dict]) -> List[WorkoutSuggestion]:
-        # Placeholder for a real OpenAI call — keeping heuristic for now
+    # --- OpenAI (optional) ---
+
+    def _plan_week_with_openai(
+        self, plan: PlanContext, week_dates: List[str], recent_workouts: List[Dict]
+    ) -> List[WorkoutSuggestion]:
+        # Placeholder for a real OpenAI prompt. For now, reuse heuristic.
         return self._plan_week_heuristic(plan, week_dates, recent_workouts)
