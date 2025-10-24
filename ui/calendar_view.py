@@ -1,5 +1,6 @@
 """Calendar View Widget (badges + tooltips + AI Recalculate + Status Dashboard)
-Header is now OUTSIDE the scroll area to avoid right-edge clipping.
+Header is outside the scroll area to avoid right-edge clipping.
+Now includes Manage Day and Move/Copy actions.
 """
 
 from typing import List, Dict, Optional
@@ -13,6 +14,8 @@ from PySide6.QtGui import QCursor, QFontMetrics
 
 from ui.workout_dialogs import AddEditWorkoutDialog, CompleteWorkoutDialog
 from ui.ai_recalc_dialog import AIRecalcDialog
+from ui.day_workouts_dialog import DayWorkoutsDialog
+from ui.move_copy_dialog import MoveCopyDialog
 from services.ai_planner import AIPlanner, PlanContext, WorkoutSuggestion
 
 
@@ -100,7 +103,6 @@ class CalendarView(QWidget):
         scroller.setWidgetResizable(True)
         scroller.setFrameShape(QFrame.NoFrame)
         scroller.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        # Extra right margin to avoid vertical scrollbar overlap with content
         scroller.setViewportMargins(0, 0, 18, 0)
         self.scroll = scroller
 
@@ -144,7 +146,7 @@ class CalendarView(QWidget):
         samples = [f"{mn} 2088" for mn in month_names]
         max_text = max(samples, key=lambda s: fm.horizontalAdvance(s))
         width = fm.horizontalAdvance(max_text) + 24
-        return max(240, width)  # a touch wider to keep arrows close to label
+        return max(240, width)
 
     def create_header(self) -> QWidget:
         header = QWidget()
@@ -187,9 +189,9 @@ class CalendarView(QWidget):
         self.recalc_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.recalc_btn.clicked.connect(self.recalculate_week)
 
-        header_layout.addStretch()                           # left spacer
+        header_layout.addStretch()
         header_layout.addWidget(nav_group, 0, Qt.AlignCenter)
-        header_layout.addStretch()                           # center-right spacer
+        header_layout.addStretch()
         header_layout.addWidget(self.recalc_btn, 0, Qt.AlignRight)
 
         return header
@@ -278,7 +280,6 @@ class CalendarView(QWidget):
         self.grid_container.setMinimumWidth(avail_w)
 
     def _compact_header_if_needed(self):
-        # Header is outside the scroll area, so use the whole widget's width.
         try:
             vw = self.width()
             if self.recalc_btn:
@@ -419,7 +420,12 @@ class CalendarView(QWidget):
 
     def _open_context_menu(self, date_str: str, workouts_for_day: List[Dict], global_pos):
         menu = QMenu(self)
+        act_manage = None
+        act_move_copy = None
         if workouts_for_day:
+            act_manage = menu.addAction("Manage day…")
+            act_move_copy = menu.addAction("Move/Copy…")
+            menu.addSeparator()
             act_edit = menu.addAction("Edit workout…")
             act_complete = menu.addAction("Mark completed…")
             act_delete = menu.addAction("Delete workout")
@@ -433,6 +439,13 @@ class CalendarView(QWidget):
         if not chosen:
             return
 
+        if act_manage and chosen == act_manage:
+            self._open_manage_day(date_str)
+            return
+        if act_move_copy and chosen == act_move_copy:
+            self._move_or_copy_workout(date_str, workouts_for_day[0])
+            return
+
         if chosen == act_add:
             self.add_workout(date_str)
         elif act_edit and chosen == act_edit:
@@ -441,6 +454,46 @@ class CalendarView(QWidget):
             self.complete_workout_dialog(date_str, workouts_for_day[0])
         elif act_delete and chosen == act_delete:
             self.delete_workout(workouts_for_day[0]["id"])
+
+    def _open_manage_day(self, date_str: str):
+        if not (self.db_manager and self.current_plan):
+            return
+        dlg = DayWorkoutsDialog(self, date_str=date_str, db_manager=self.db_manager, plan_id=self.current_plan["id"])
+        dlg.data_changed.connect(lambda: (self.load_workouts(), self.refresh_calendar()))
+        dlg.exec()
+
+    def _move_or_copy_workout(self, date_str: str, workout: dict):
+        """Open dialog to move/copy a workout to another date."""
+        if not (self.db_manager and self.current_plan and workout):
+            return
+        dlg = MoveCopyDialog(self, current_date_str=date_str)
+        if not dlg.exec():
+            return
+        result = dlg.result_value()
+        if not result:
+            return
+        new_date = result["date"]
+        mode = result["mode"]  # 'move' | 'copy'
+
+        if mode == "move":
+            # Just update this workout's date
+            self.db_manager.update_workout(workout["id"], {"date": new_date, "modified_by": "reschedule"})
+        else:
+            # Copy: clone most fields into a new row with new date
+            payload = {
+                "plan_id": self.current_plan["id"],
+                "date": new_date,
+                "workout_type": workout.get("workout_type"),
+                "planned_distance": workout.get("planned_distance"),
+                "planned_intensity": workout.get("planned_intensity"),
+                "description": workout.get("description"),
+                "notes": workout.get("notes"),
+                "modified_by": "reschedule-copy",
+            }
+            self.db_manager.create_workout(payload)
+
+        self.load_workouts()
+        self.refresh_calendar()
 
     # --- Actions (CRUD) ---
 
