@@ -1,17 +1,30 @@
-"""Calendar View Widget (with AI Recalculate + Status Dashboard)"""
+"""Calendar View Widget (badges + tooltips + AI Recalculate + Status Dashboard)
+Header is now OUTSIDE the scroll area to avoid right-edge clipping.
+"""
 
 from typing import List, Dict, Optional
-from PySide6.QtCore import QEvent  # add this near the top of the file
+
 from PySide6.QtWidgets import (
     QWidget, QScrollArea, QSizePolicy, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QGridLayout, QFrame, QMenu, QMessageBox
 )
-from PySide6.QtCore import Qt, QDate, QLocale
+from PySide6.QtCore import Qt, QDate, QLocale, QEvent
 from PySide6.QtGui import QCursor, QFontMetrics
 
 from ui.workout_dialogs import AddEditWorkoutDialog, CompleteWorkoutDialog
 from ui.ai_recalc_dialog import AIRecalcDialog
 from services.ai_planner import AIPlanner, PlanContext, WorkoutSuggestion
+
+
+def _fmt_secs(secs: Optional[int]) -> str:
+    if secs is None or secs <= 0:
+        return "—"
+    h = secs // 3600
+    m = (secs % 3600) // 60
+    s = secs % 60
+    if h > 0:
+        return f"{h:d}:{m:02d}:{s:02d}"
+    return f"{m:d}:{s:02d}"
 
 
 class CalendarView(QWidget):
@@ -72,21 +85,38 @@ class CalendarView(QWidget):
     # --- UI construction ---
 
     def init_ui(self):
-        layout = QVBoxLayout()
-        layout.setContentsMargins(16, 16, 16, 16)
+        # Outer page layout (header above, scroll area below, status at bottom)
+        page = QVBoxLayout()
+        page.setContentsMargins(16, 16, 16, 16)
+        page.setSpacing(12)
 
-        calendar_container = QFrame()
-        calendar_container.setObjectName("calendarContainer")
-        calendar_container.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
-        calendar_layout = QVBoxLayout()
-        calendar_layout.setContentsMargins(12, 0, 12, 0)
-
+        # HEADER (outside scroll area to prevent clipping)
         header = self.create_header()
-        calendar_layout.addWidget(header)
+        page.addWidget(header)
 
+        # SCROLL AREA with only weekday headers + calendar grid
+        scroller = QScrollArea()
+        scroller.setObjectName("calendarScroll")
+        scroller.setWidgetResizable(True)
+        scroller.setFrameShape(QFrame.NoFrame)
+        scroller.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        # Extra right margin to avoid vertical scrollbar overlap with content
+        scroller.setViewportMargins(0, 0, 18, 0)
+        self.scroll = scroller
+
+        # Scroll content
+        scroll_content = QFrame()
+        scroll_content.setObjectName("calendarContainer")
+        scroll_content.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+        scroll_v = QVBoxLayout(scroll_content)
+        scroll_v.setContentsMargins(12, 0, 12, 0)
+        scroll_v.setSpacing(8)
+
+        # Weekday headers
         weekdays = self.create_weekday_headers()
-        calendar_layout.addWidget(weekdays)
+        scroll_v.addWidget(weekdays)
 
+        # Calendar grid
         self.grid_container = QWidget()
         self.grid_container.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
         self.grid_layout = QGridLayout()
@@ -94,23 +124,16 @@ class CalendarView(QWidget):
         for i in range(7):
             self.grid_layout.setColumnStretch(i, 1)
         self.grid_container.setLayout(self.grid_layout)
-        calendar_layout.addWidget(self.grid_container)
+        scroll_v.addWidget(self.grid_container)
 
-        calendar_container.setLayout(calendar_layout)
+        scroller.setWidget(scroll_content)
+        page.addWidget(scroller)
 
-        self.scroll = QScrollArea()
-        self.scroll.setObjectName("calendarScroll")
-        self.scroll.setWidgetResizable(True)
-        self.scroll.setFrameShape(QFrame.NoFrame)
-        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.scroll.setViewportMargins(0, 0, 18, 0)
-        self.scroll.setWidget(calendar_container)
-        layout.addWidget(self.scroll)
-
+        # STATUS at bottom
         status = self.create_status_window()
-        layout.addWidget(status)
+        page.addWidget(status)
 
-        self.setLayout(layout)
+        self.setLayout(page)
         self.apply_styles()
         self.refresh_calendar()
 
@@ -121,16 +144,17 @@ class CalendarView(QWidget):
         samples = [f"{mn} 2088" for mn in month_names]
         max_text = max(samples, key=lambda s: fm.horizontalAdvance(s))
         width = fm.horizontalAdvance(max_text) + 24
-        return max(200, width)
+        return max(240, width)  # a touch wider to keep arrows close to label
 
     def create_header(self) -> QWidget:
         header = QWidget()
-        header_layout = QHBoxLayout()
+        header_layout = QHBoxLayout(header)
         header_layout.setSpacing(8)
         header_layout.setContentsMargins(0, 0, 0, 0)
 
+        # Navigation group (prev, label, next)
         nav_group = QWidget()
-        nav_layout = QHBoxLayout()
+        nav_layout = QHBoxLayout(nav_group)
         nav_layout.setSpacing(8)
         nav_layout.setContentsMargins(0, 0, 0, 0)
 
@@ -154,26 +178,25 @@ class CalendarView(QWidget):
         nav_layout.addWidget(self.month_label)
         nav_layout.addWidget(next_btn)
 
-        nav_group.setLayout(nav_layout)
         nav_group.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
 
+        # Recalculate button pinned to the right
         self.recalc_btn = QPushButton("🔄 Recalculate")
         self.recalc_btn.setObjectName("actionButton")
         self.recalc_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.recalc_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.recalc_btn.clicked.connect(self.recalculate_week)
 
-        header_layout.addStretch()
-        header_layout.addWidget(nav_group, 0, Qt.AlignmentFlag.AlignCenter)
-        header_layout.addStretch()
-        header_layout.addWidget(self.recalc_btn, 0, Qt.AlignmentFlag.AlignRight)
+        header_layout.addStretch()                           # left spacer
+        header_layout.addWidget(nav_group, 0, Qt.AlignCenter)
+        header_layout.addStretch()                           # center-right spacer
+        header_layout.addWidget(self.recalc_btn, 0, Qt.AlignRight)
 
-        header.setLayout(header_layout)
         return header
 
     def create_weekday_headers(self) -> QWidget:
         container = QWidget()
-        layout = QHBoxLayout()
+        layout = QHBoxLayout(container)
         layout.setSpacing(8)
         layout.setContentsMargins(0, 0, 0, 0)
 
@@ -184,7 +207,6 @@ class CalendarView(QWidget):
             label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             layout.addWidget(label)
 
-        container.setLayout(layout)
         return container
 
     # --- Calendar rendering ---
@@ -199,7 +221,7 @@ class CalendarView(QWidget):
         month = self.current_date.month()
         first_day = QDate(year, month, 1)
         days_in_month = first_day.daysInMonth()
-        start_day_of_week = first_day.dayOfWeek() % 7
+        start_day_of_week = first_day.dayOfWeek() % 7  # Sunday=0
 
         total_cells = 42
         row = 0
@@ -243,7 +265,7 @@ class CalendarView(QWidget):
         spacing = self.grid_layout.horizontalSpacing() or 0
         cols = 7
         cell_w = max(90, int((avail_w - (spacing * (cols - 1)) - 2) / cols))
-        cell_h = max(72, int(cell_w * 0.75))
+        cell_h = max(88, int(cell_w * 0.78))  # slightly taller for badges
 
         for i in range(self.grid_layout.count()):
             w = self.grid_layout.itemAt(i).widget()
@@ -256,8 +278,9 @@ class CalendarView(QWidget):
         self.grid_container.setMinimumWidth(avail_w)
 
     def _compact_header_if_needed(self):
+        # Header is outside the scroll area, so use the whole widget's width.
         try:
-            vw = self.scroll.viewport().width() if self.scroll and self.scroll.viewport() else self.width()
+            vw = self.width()
             if self.recalc_btn:
                 if vw < 900 and self.recalc_btn.text() != "🔄":
                     self.recalc_btn.setText("🔄")
@@ -266,57 +289,120 @@ class CalendarView(QWidget):
         except Exception:
             pass
 
+    # --- Day cell creation + tooltips/badges ---
+
+    def _build_tooltip_html(self, date_str: str, workouts_for_day: List[Dict]) -> str:
+        if not workouts_for_day:
+            return f"<b>{date_str}</b><br><i>No workouts</i>"
+        rows = []
+        for w in workouts_for_day:
+            wt = (w.get("workout_type") or "").upper()
+            pd = w.get("planned_distance")
+            pd_txt = f"{float(pd):.1f} mi" if pd is not None else "—"
+            comp = "✓" if w.get("completed") else "—"
+            ad = w.get("actual_distance")
+            at = w.get("actual_time_seconds")
+            ad_txt = f"{float(ad):.1f} mi" if ad is not None else "—"
+            at_txt = _fmt_secs(at)
+            desc = w.get("description") or ""
+            rows.append(
+                f"<tr>"
+                f"<td style='padding-right:6px;'>{comp}</td>"
+                f"<td style='padding-right:10px;'><b>{wt}</b></td>"
+                f"<td style='padding-right:10px;'>Planned: {pd_txt}</td>"
+                f"<td style='padding-right:10px;'>Actual: {ad_txt} / {at_txt}</td>"
+                f"<td style='color:#666'>{desc}</td>"
+                f"</tr>"
+            )
+        table = "<table cellspacing='0' cellpadding='0'>" + "".join(rows) + "</table>"
+        return f"<b>{date_str}</b><br>{table}"
+
+    def _make_chip(self, text: str, chip_class: str) -> QLabel:
+        chip = QLabel(text)
+        chip.setObjectName(chip_class)
+        chip.setAlignment(Qt.AlignCenter)
+        return chip
+
     def create_day_cell(self, date: QDate) -> QFrame:
         cell = QFrame()
         cell.setObjectName("dayCell")
         cell.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         cell.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
 
-        layout = QVBoxLayout()
-        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-        layout.setContentsMargins(8, 8, 8, 8)
+        outer = QVBoxLayout()
+        outer.setAlignment(Qt.AlignmentFlag.AlignTop)
+        outer.setContentsMargins(8, 8, 8, 8)
+        outer.setSpacing(4)
 
+        # Top row: date number + completion/more badges
+        top_row = QHBoxLayout()
+        top_row.setSpacing(6)
         day_label = QLabel(str(date.day()))
         day_label.setObjectName("dayNumber")
-        layout.addWidget(day_label)
+        top_row.addWidget(day_label)
+        top_row.addStretch()
 
         date_str = date.toString("yyyy-MM-dd")
         workouts_for_day = self.workouts.get(date_str, [])
 
+        any_completed = any(w.get("completed") for w in workouts_for_day)
+        if any_completed:
+            comp_badge = self._make_chip("✓", "chipDone")
+            top_row.addWidget(comp_badge)
+
+        if len(workouts_for_day) > 1:
+            more_badge = self._make_chip(f"+{len(workouts_for_day)-1}", "chipMore")
+            top_row.addWidget(more_badge)
+
+        outer.addLayout(top_row)
+
+        # Type chips (up to 2 to avoid clutter)
+        chips_row = QHBoxLayout()
+        chips_row.setSpacing(4)
         if workouts_for_day:
-            first = workouts_for_day[0]
-            type_label = QLabel(first['workout_type'].upper())
-            type_label.setObjectName("workoutType")
-            layout.addWidget(type_label)
+            seen = set()
+            for w in workouts_for_day:
+                wt = (w.get("workout_type") or "").lower()
+                if wt in seen:
+                    continue
+                seen.add(wt)
+                if wt == "easy":
+                    chips_row.addWidget(self._make_chip("easy", "chipEasy"))
+                elif wt == "tempo":
+                    chips_row.addWidget(self._make_chip("tempo", "chipTempo"))
+                elif wt == "intervals":
+                    chips_row.addWidget(self._make_chip("ints", "chipIntervals"))
+                elif wt == "long":
+                    chips_row.addWidget(self._make_chip("long", "chipLong"))
+                elif wt == "rest":
+                    chips_row.addWidget(self._make_chip("rest", "chipRest"))
+                if len(seen) >= 2:
+                    break
+        outer.addLayout(chips_row)
 
-            if first.get('planned_distance') is not None:
-                distance_label = QLabel(f"{float(first['planned_distance']):.1f} mi")
-                distance_label.setObjectName("workoutDistance")
-                layout.addWidget(distance_label)
-
-            if first.get('completed'):
-                completed_label = QLabel("✓ Completed")
-                completed_label.setObjectName("completedLabel")
-                layout.addWidget(completed_label)
-
-            if len(workouts_for_day) > 1:
-                extra = QLabel(f"+{len(workouts_for_day) - 1} more")
-                extra.setObjectName("workoutDistance")
-                layout.addWidget(extra)
+        # Primary distance
+        if workouts_for_day and workouts_for_day[0].get("planned_distance") is not None:
+            dist = QLabel(f"{float(workouts_for_day[0]['planned_distance']):.1f} mi")
+            dist.setObjectName("workoutDistance")
+            outer.addWidget(dist)
         else:
             no_workout = QLabel("—")
             no_workout.setObjectName("noWorkout")
             no_workout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            layout.addWidget(no_workout)
+            outer.addWidget(no_workout)
 
-        cell.setLayout(layout)
+        cell.setLayout(outer)
 
+        # Tooltip
+        cell.setToolTip(self._build_tooltip_html(date_str, workouts_for_day))
+
+        # Mouse behavior
         def _mouse_press(ev):
             if ev.button() == Qt.RightButton:
                 self._open_context_menu(date_str, workouts_for_day, cell.mapToGlobal(ev.pos()))
                 return
             if ev.button() == Qt.LeftButton and ev.type() == QEvent.MouseButtonPress:
-                return
+                return  # swallow single-press
 
         def _mouse_double_click(ev):
             if ev.button() == Qt.LeftButton:
@@ -551,8 +637,7 @@ class CalendarView(QWidget):
         container.setObjectName("statusWindow")
         container.setMaximumHeight(200)
 
-        layout = QVBoxLayout()
-
+        layout = QVBoxLayout(container)
         header = QHBoxLayout()
         title = QLabel("STATUS DASHBOARD")
         title.setObjectName("statusTitle")
@@ -571,7 +656,6 @@ class CalendarView(QWidget):
         self.status_content.setObjectName("statusContent")
         layout.addWidget(self.status_content)
 
-        container.setLayout(layout)
         return container
 
     # --- Navigation / helpers ---
@@ -597,22 +681,33 @@ class CalendarView(QWidget):
         self.setStyleSheet("""
             QFrame#calendarContainer { background-color: white; border-radius: 12px; padding: 24px; }
             QLabel#monthLabel { font-size: 24px; color: #2c3e50; font-weight: bold; }
-            QPushButton#navButton { background-color: transparent; color: #2c3e50; border: 1px solid rgba(44, 62, 80, 0.3);
+            QPushButton#navButton { background-color: transparent; color: #2c3e50; border: 1px solid rgba(44,62,80,.3);
                                     border-radius: 6px; padding: 8px 12px; font-size: 16px; }
-            QPushButton#navButton:hover { background-color: rgba(44, 62, 80, 0.1); }
+            QPushButton#navButton:hover { background-color: rgba(44,62,80,.1); }
             QPushButton#actionButton { background-color: white; color: #2c3e50; border: 1px solid #bdc3c7; border-radius: 6px; padding: 8px 16px; }
             QPushButton#actionButton:hover { background-color: #ecf0f1; }
+
             QLabel#weekdayHeader { font-size: 14px; font-weight: 600; color: #7f8c8d; text-transform: uppercase; padding: 10px; }
+
             QFrame#dayCell { background-color: #f8f9fa; border: 1px solid #ecf0f1; border-radius: 8px; padding: 6px; }
             QFrame#dayCell:hover { background-color: #e8f4f8; border-color: #3498db; }
             QFrame#emptyCell { background-color: transparent; border: none; }
+
             QLabel#dayNumber { font-size: 16px; color: #2c3e50; font-weight: 600; }
-            QLabel#workoutType { font-size: 11px; color: #3498db; font-weight: 600; margin-top: 4px; }
             QLabel#workoutDistance { font-size: 13px; color: #555; margin-top: 2px; }
             QLabel#completedLabel { font-size: 10px; color: #27ae60; margin-top: 4px; }
             QLabel#noWorkout { font-size: 20px; color: #bdc3c7; margin-top: 8px; }
-            QFrame#statusWindow { background-color: white; border-top: 3px solid #3498db; padding: 16px 24px; }
-            QLabel#statusTitle { font-size: 14px; font-weight: 600; color: #2c3e50; letter-spacing: 0.5px; }
-            QLabel#statusContent { font-size: 14px; color: #555; line-height: 1.6; }
-            QPushButton#expandButton { background-color: transparent; border: none; font-size: 14px; color: #7f8c8d; padding: 4px; }
+
+            /* Chips */
+            QLabel#chipDone, QLabel#chipMore, QLabel#chipEasy, QLabel#chipTempo, QLabel#chipIntervals, QLabel#chipLong, QLabel#chipRest {
+                border-radius: 10px; padding: 2px 6px; font-size: 11px; font-weight: 600; min-width: 16px;
+            }
+            QLabel#chipDone { background: #eafaf1; color: #1e824c; border: 1px solid #bfe8cf; }
+            QLabel#chipMore { background: #eef2f7; color: #2c3e50; border: 1px solid #d6dde6; }
+
+            QLabel#chipEasy { background: #e8f7ff; color: #0b70b8; border: 1px solid #c5e6ff; }
+            QLabel#chipTempo { background: #fff3e6; color: #b45f06; border: 1px solid #ffe0bf; }
+            QLabel#chipIntervals { background: #f3e8ff; color: #6a1cb2; border: 1px solid #e3ccff; }
+            QLabel#chipLong { background: #eafaf1; color: #1e824c; border: 1px solid #bfe8cf; }
+            QLabel#chipRest { background: #f2f2f2; color: #777; border: 1px solid #e0e0e0; }
         """)
