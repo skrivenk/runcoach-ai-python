@@ -3,10 +3,12 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 from datetime import datetime
+import sys
 
 
 class DatabaseManager:
@@ -15,15 +17,19 @@ class DatabaseManager:
         Initialize database manager.
 
         Args:
-            db_path: Path to database file. If None, uses AppData folder on Windows (or home dir otherwise).
+            db_path: Path to database file. If None, uses:
+                     - Windows: %APPDATA%\\RunCoach\\runcoach.db
+                     - Others : ~/.runcoach/runcoach.db
         """
         if db_path is None:
-            app_data = Path.home() / ("AppData" / Path("Roaming") if Path.home().anchor else "") / "RunCoach"
-            # On non-Windows, Path("Roaming") won't exist; normalize:
-            if isinstance(app_data, Path) and str(app_data).endswith("/"):
-                app_data = Path.home() / ".runcoach"
-            app_data.mkdir(parents=True, exist_ok=True)
-            db_path = app_data / "runcoach.db"
+            if sys.platform.startswith("win"):
+                appdata = os.environ.get("APPDATA")
+                base = Path(appdata) if appdata else (Path.home() / "AppData" / "Roaming")
+                root = base / "RunCoach"
+            else:
+                root = Path.home() / ".runcoach"
+            root.mkdir(parents=True, exist_ok=True)
+            db_path = root / "runcoach.db"
 
         self.db_path = str(db_path)
         self.init_database()
@@ -33,23 +39,26 @@ class DatabaseManager:
     # ------------------------------------------------------------------ #
 
     def get_connection(self) -> sqlite3.Connection:
-        """Get database connection with row factory."""
+        """Get database connection with row factory and foreign keys ON."""
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
+        # Always enforce FKs (also set in schema, but per-connection is safest)
+        conn.execute("PRAGMA foreign_keys = ON;")
         return conn
 
     def init_database(self):
-        """Initialize database with schema.sql if present."""
+        """Initialize database using schema.sql if present (idempotent)."""
         schema_path = Path(__file__).parent / "schema.sql"
         if schema_path.exists():
             with self.get_connection() as conn:
                 with open(schema_path, "r", encoding="utf-8") as f:
                     conn.executescript(f.read())
         else:
-            # Minimal fallback schema so the app can run even if schema.sql is missing.
+            # Minimal fallback schema (kept very small on purpose)
             with self.get_connection() as conn:
                 conn.executescript(
                     """
+                    PRAGMA foreign_keys = ON;
                     CREATE TABLE IF NOT EXISTS plans (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         name TEXT NOT NULL,
@@ -62,16 +71,16 @@ class DatabaseManager:
                         weekly_increase_cap REAL DEFAULT 0.10,
                         long_run_cap REAL DEFAULT 0.30,
                         guardrails_enabled INTEGER DEFAULT 1,
-                        created_at TEXT DEFAULT (datetime('now'))
+                        created_at TEXT DEFAULT (datetime('now')),
+                        last_modified TEXT DEFAULT (datetime('now'))
                     );
-
                     CREATE TABLE IF NOT EXISTS workouts (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         plan_id INTEGER NOT NULL,
-                        date TEXT NOT NULL,               -- YYYY-MM-DD
+                        date TEXT NOT NULL,
                         version INTEGER DEFAULT 1,
                         is_current_version INTEGER DEFAULT 1,
-                        workout_type TEXT NOT NULL,       -- easy/tempo/intervals/long/rest
+                        workout_type TEXT NOT NULL,
                         planned_distance REAL,
                         planned_intensity TEXT,
                         description TEXT,
@@ -81,13 +90,15 @@ class DatabaseManager:
                         actual_time_seconds INTEGER,
                         actual_rpe INTEGER,
                         avg_hr INTEGER,
-                        elevation_gain INTEGER,
+                        elevation_gain REAL,
                         completion_notes TEXT,
                         completed_at TEXT,
+                        created_at TEXT DEFAULT (datetime('now')),
                         modified_by TEXT,
-                        FOREIGN KEY(plan_id) REFERENCES plans(id)
+                        FOREIGN KEY(plan_id) REFERENCES plans(id) ON DELETE CASCADE
                     );
-
+                    CREATE INDEX IF NOT EXISTS idx_workouts_current
+                      ON workouts(plan_id, date, is_current_version);
                     CREATE TABLE IF NOT EXISTS baseline_runs (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         plan_id INTEGER NOT NULL,
@@ -96,14 +107,13 @@ class DatabaseManager:
                         time_seconds INTEGER,
                         rpe INTEGER,
                         avg_hr INTEGER,
-                        elevation_gain INTEGER,
+                        elevation_gain REAL,
                         notes TEXT,
-                        FOREIGN KEY(plan_id) REFERENCES plans(id)
+                        FOREIGN KEY(plan_id) REFERENCES plans(id) ON DELETE CASCADE
                     );
-
                     CREATE TABLE IF NOT EXISTS app_settings (
                         key TEXT PRIMARY KEY,
-                        value TEXT
+                        value TEXT NOT NULL
                     );
                     """
                 )
@@ -129,11 +139,10 @@ class DatabaseManager:
                 (key, value),
             )
 
-    # Convenience wrappers used by UI
     def get_current_plan_id(self) -> Optional[int]:
         val = self.get_setting("current_plan_id")
         try:
-            return int(val) if val is not None and val != "" else None
+            return int(val) if val not in (None, "") else None
         except Exception:
             return None
 
@@ -230,17 +239,26 @@ class DatabaseManager:
             return cur.lastrowid
 
     def update_workout(self, workout_id: int, data: Dict[str, Any]):
-        """Update planned fields for a workout (current version)."""
-        fields = [
-            ("workout_type", data.get("workout_type")),
-            ("planned_distance", data.get("planned_distance")),
-            ("planned_intensity", data.get("planned_intensity")),
-            ("description", data.get("description")),
-            ("notes", data.get("notes")),
-            ("modified_by", data.get("modified_by", "user")),
-        ]
-        set_clause = ", ".join([f"{k} = ?" for k, v in fields])
-        values = [v for k, v in fields]
+        """
+        Update fields for a workout (current version). Supports changing 'date' for rescheduling.
+        Only fields present in 'data' are updated.
+        """
+        allowed_keys = {
+            "date",
+            "workout_type",
+            "planned_distance",
+            "planned_intensity",
+            "description",
+            "notes",
+            "version",
+            "is_current_version",
+            "modified_by",
+        }
+        kv = [(k, v) for k, v in data.items() if k in allowed_keys]
+        if not kv:
+            return
+        set_clause = ", ".join([f"{k} = ?" for k, _ in kv])
+        values = [v for _, v in kv]
         values.append(workout_id)
         with self.get_connection() as conn:
             conn.execute(f"UPDATE workouts SET {set_clause} WHERE id = ?", values)
@@ -253,12 +271,12 @@ class DatabaseManager:
         with self.get_connection() as conn:
             if current_only:
                 cur = conn.execute(
-                    "SELECT * FROM workouts WHERE plan_id = ? AND is_current_version = 1 ORDER BY date ASC",
+                    "SELECT * FROM workouts WHERE plan_id = ? AND is_current_version = 1 ORDER BY date ASC, id ASC",
                     (plan_id,),
                 )
             else:
                 cur = conn.execute(
-                    "SELECT * FROM workouts WHERE plan_id = ? ORDER BY date ASC",
+                    "SELECT * FROM workouts WHERE plan_id = ? ORDER BY date ASC, id ASC",
                     (plan_id,),
                 )
             return [dict(r) for r in cur.fetchall()]
@@ -330,13 +348,78 @@ class DatabaseManager:
             )
 
     # ------------------------------------------------------------------ #
+    # Templates (workout_templates)
+    # ------------------------------------------------------------------ #
+
+    def get_all_templates(self) -> List[Dict[str, Any]]:
+        """Return all workout templates sorted by name."""
+        with self.get_connection() as conn:
+            cur = conn.execute(
+                """
+                SELECT id, name, workout_type, planned_distance, planned_intensity, description, notes, created_at
+                FROM workout_templates
+                ORDER BY name COLLATE NOCASE ASC
+                """
+            )
+            return [dict(r) for r in cur.fetchall()]
+
+    def get_template_by_id(self, template_id: int) -> Optional[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            cur = conn.execute(
+                """
+                SELECT id, name, workout_type, planned_distance, planned_intensity, description, notes, created_at
+                FROM workout_templates
+                WHERE id = ?
+                """,
+                (template_id,),
+            )
+            row = cur.fetchone()
+            return dict(row) if row else None
+
+    def create_template(self, tpl: Dict[str, Any]) -> int:
+        """
+        Create or upsert a workout template (unique on name).
+        Returns the template id.
+        """
+        with self.get_connection() as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO workout_templates
+                    (name, workout_type, planned_distance, planned_intensity, description, notes)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(name) DO UPDATE SET
+                    workout_type      = excluded.workout_type,
+                    planned_distance  = excluded.planned_distance,
+                    planned_intensity = excluded.planned_intensity,
+                    description       = excluded.description,
+                    notes             = excluded.notes
+                """,
+                (
+                    tpl["name"],
+                    tpl["workout_type"],
+                    tpl.get("planned_distance"),
+                    tpl.get("planned_intensity"),
+                    tpl.get("description"),
+                    tpl.get("notes"),
+                ),
+            )
+            # Re-select to get id even on update
+            cur = conn.execute("SELECT id FROM workout_templates WHERE name = ?", (tpl["name"],))
+            row = cur.fetchone()
+            return row["id"] if row else 0
+
+    def delete_template(self, template_id: int):
+        with self.get_connection() as conn:
+            conn.execute("DELETE FROM workout_templates WHERE id = ?", (template_id,))
+
+    # ------------------------------------------------------------------ #
     # Status / queries used by dashboard & AI
     # ------------------------------------------------------------------ #
 
     def get_next_key_workout(self, plan_id: int, from_date: str) -> Optional[Dict[str, Any]]:
         """
         Return the next upcoming 'key' workout on/after from_date.
-        We bias to non-rest types and prefer long/tempo/intervals.
+        Bias to non-rest types and prefer long/tempo/intervals.
         """
         with self.get_connection() as conn:
             cur = conn.execute(

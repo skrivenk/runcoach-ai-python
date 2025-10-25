@@ -1,6 +1,10 @@
 -- RunCoach AI Database Schema (Python/SQLite)
 
+PRAGMA foreign_keys = ON;
+
+-- =========================================
 -- Training Plans
+-- =========================================
 CREATE TABLE IF NOT EXISTS plans (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
@@ -17,7 +21,18 @@ CREATE TABLE IF NOT EXISTS plans (
     last_modified TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Touch last_modified on plan updates
+CREATE TRIGGER IF NOT EXISTS trg_plans_touch_last_modified
+AFTER UPDATE ON plans
+BEGIN
+    UPDATE plans
+       SET last_modified = CURRENT_TIMESTAMP
+     WHERE id = NEW.id;
+END;
+
+-- =========================================
 -- Baseline Runs
+-- =========================================
 CREATE TABLE IF NOT EXISTS baseline_runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     plan_id INTEGER NOT NULL,
@@ -31,7 +46,9 @@ CREATE TABLE IF NOT EXISTS baseline_runs (
     FOREIGN KEY (plan_id) REFERENCES plans(id) ON DELETE CASCADE
 );
 
+-- =========================================
 -- Workouts (Versioned)
+-- =========================================
 CREATE TABLE IF NOT EXISTS workouts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     plan_id INTEGER NOT NULL,
@@ -59,9 +76,41 @@ CREATE TABLE IF NOT EXISTS workouts (
     UNIQUE(plan_id, date, version)
 );
 
+-- Speed up "current" queries
 CREATE INDEX IF NOT EXISTS idx_workouts_current ON workouts(plan_id, date, is_current_version);
 
+-- View for "current version only"
+CREATE VIEW IF NOT EXISTS v_workouts_current AS
+SELECT *
+  FROM workouts
+ WHERE is_current_version = 1;
+
+-- Ensure only one current version per (plan_id, date)
+CREATE TRIGGER IF NOT EXISTS trg_workouts_current_exclusive_ins
+AFTER INSERT ON workouts
+WHEN NEW.is_current_version = 1
+BEGIN
+    UPDATE workouts
+       SET is_current_version = 0
+     WHERE plan_id = NEW.plan_id
+       AND date    = NEW.date
+       AND id     != NEW.id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_workouts_current_exclusive_upd
+AFTER UPDATE OF is_current_version ON workouts
+WHEN NEW.is_current_version = 1
+BEGIN
+    UPDATE workouts
+       SET is_current_version = 0
+     WHERE plan_id = NEW.plan_id
+       AND date    = NEW.date
+       AND id     != NEW.id;
+END;
+
+-- =========================================
 -- Plan Constraints
+-- =========================================
 CREATE TABLE IF NOT EXISTS plan_constraints (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     plan_id INTEGER NOT NULL,
@@ -70,7 +119,9 @@ CREATE TABLE IF NOT EXISTS plan_constraints (
     FOREIGN KEY (plan_id) REFERENCES plans(id) ON DELETE CASCADE
 );
 
+-- =========================================
 -- Status Snapshots
+-- =========================================
 CREATE TABLE IF NOT EXISTS status_snapshots (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     plan_id INTEGER NOT NULL,
@@ -88,7 +139,9 @@ CREATE TABLE IF NOT EXISTS status_snapshots (
     FOREIGN KEY (plan_id) REFERENCES plans(id) ON DELETE CASCADE
 );
 
+-- =========================================
 -- API Call Log
+-- =========================================
 CREATE TABLE IF NOT EXISTS api_calls (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     plan_id INTEGER,
@@ -99,7 +152,9 @@ CREATE TABLE IF NOT EXISTS api_calls (
     FOREIGN KEY (plan_id) REFERENCES plans(id) ON DELETE CASCADE
 );
 
+-- =========================================
 -- App Settings
+-- =========================================
 CREATE TABLE IF NOT EXISTS app_settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -109,3 +164,26 @@ INSERT OR IGNORE INTO app_settings (key, value) VALUES
     ('units', 'imperial'),
     ('theme', 'light'),
     ('api_key', '');
+
+-- =========================================
+-- Workout Templates (presets)
+-- =========================================
+CREATE TABLE IF NOT EXISTS workout_templates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    workout_type TEXT NOT NULL CHECK(workout_type IN ('easy', 'tempo', 'intervals', 'long', 'recovery', 'rest', 'crosstrain')),
+    planned_distance REAL,
+    planned_intensity TEXT,
+    description TEXT,
+    notes TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+
+-- Optional starter templates
+INSERT OR IGNORE INTO workout_templates (name, workout_type, planned_distance, planned_intensity, description, notes)
+VALUES
+  ('Easy Run 5mi', 'easy', 5.0, NULL, 'Steady conversational pace', NULL),
+  ('Tempo 4mi', 'tempo', 4.0, NULL, 'Comfortably hard, controlled', NULL),
+  ('Intervals 8x400m', 'intervals', NULL, '8x400m @ 5K pace, 200m jog', 'Track session'),
+  ('Long Run 10mi', 'long', 10.0, NULL, 'Keep it aerobic; gel around 45–60 min', NULL),
+  ('Rest Day', 'rest', NULL, NULL, 'Recovery day', NULL);
