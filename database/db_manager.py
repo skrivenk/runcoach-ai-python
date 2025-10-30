@@ -1,14 +1,21 @@
 # database/db_manager.py
-"""Database Manager for RunCoach AI"""
+"""Database Manager for RunCoach AI
+
+- Uses %APPDATA%\RunCoach\runcoach.db on Windows, ~/.runcoach/runcoach.db elsewhere.
+- Ensures PRAGMA foreign_keys=ON per connection.
+- Provides helpers to store/read OpenAI API key with ENV override:
+    - get_api_key(): returns OPENAI_API_KEY env if set, else app_settings['api_key']
+    - set_api_key(key): persists to app_settings (plain text convenience; prefer ENV for real secrets)
+"""
 
 from __future__ import annotations
 
 import os
+import sys
 import sqlite3
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 from datetime import datetime
-import sys
 
 
 class DatabaseManager:
@@ -42,7 +49,6 @@ class DatabaseManager:
         """Get database connection with row factory and foreign keys ON."""
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
-        # Always enforce FKs (also set in schema, but per-connection is safest)
         conn.execute("PRAGMA foreign_keys = ON;")
         return conn
 
@@ -53,12 +59,23 @@ class DatabaseManager:
             with self.get_connection() as conn:
                 with open(schema_path, "r", encoding="utf-8") as f:
                     conn.executescript(f.read())
+                # Seed defaults (harmless if already present in schema.sql)
+                conn.executescript(
+                    """
+                    INSERT OR IGNORE INTO app_settings (key, value) VALUES
+                        ('units', 'imperial'),
+                        ('theme', 'light'),
+                        ('api_key', '');
+                    """
+                )
         else:
-            # Minimal fallback schema (kept very small on purpose)
+            # Minimal fallback schema (kept small on purpose)
             with self.get_connection() as conn:
                 conn.executescript(
                     """
                     PRAGMA foreign_keys = ON;
+
+                    -- Training Plans
                     CREATE TABLE IF NOT EXISTS plans (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         name TEXT NOT NULL,
@@ -74,6 +91,8 @@ class DatabaseManager:
                         created_at TEXT DEFAULT (datetime('now')),
                         last_modified TEXT DEFAULT (datetime('now'))
                     );
+
+                    -- Workouts (Versioned)
                     CREATE TABLE IF NOT EXISTS workouts (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         plan_id INTEGER NOT NULL,
@@ -97,8 +116,11 @@ class DatabaseManager:
                         modified_by TEXT,
                         FOREIGN KEY(plan_id) REFERENCES plans(id) ON DELETE CASCADE
                     );
+
                     CREATE INDEX IF NOT EXISTS idx_workouts_current
                       ON workouts(plan_id, date, is_current_version);
+
+                    -- Baseline Runs
                     CREATE TABLE IF NOT EXISTS baseline_runs (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         plan_id INTEGER NOT NULL,
@@ -111,10 +133,41 @@ class DatabaseManager:
                         notes TEXT,
                         FOREIGN KEY(plan_id) REFERENCES plans(id) ON DELETE CASCADE
                     );
+
+                    -- App Settings (k/v)
                     CREATE TABLE IF NOT EXISTS app_settings (
                         key TEXT PRIMARY KEY,
                         value TEXT NOT NULL
                     );
+
+                    -- API Call Log
+                    CREATE TABLE IF NOT EXISTS api_calls (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        plan_id INTEGER,
+                        call_type TEXT NOT NULL,
+                        timestamp TEXT DEFAULT (datetime('now')),
+                        tokens_used INTEGER,
+                        cost_usd REAL,
+                        FOREIGN KEY (plan_id) REFERENCES plans(id) ON DELETE CASCADE
+                    );
+
+                    -- Workout templates (if your schema.sql also has this, harmless)
+                    CREATE TABLE IF NOT EXISTS workout_templates (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        name TEXT NOT NULL UNIQUE,
+                        workout_type TEXT NOT NULL,
+                        planned_distance REAL,
+                        planned_intensity TEXT,
+                        description TEXT,
+                        notes TEXT,
+                        created_at TEXT DEFAULT (datetime('now'))
+                    );
+
+                    -- Defaults
+                    INSERT OR IGNORE INTO app_settings (key, value) VALUES
+                        ('units', 'imperial'),
+                        ('theme', 'light'),
+                        ('api_key', '');
                     """
                 )
 
@@ -139,6 +192,27 @@ class DatabaseManager:
                 (key, value),
             )
 
+    # ---------- OpenAI API key helpers ----------
+
+    def get_api_key(self) -> Optional[str]:
+        """
+        Return the API key with precedence:
+        1) Environment variable OPENAI_API_KEY (if set)
+        2) value from app_settings['api_key'] (if present)
+        """
+        env_key = os.environ.get("OPENAI_API_KEY")
+        if env_key:
+            return env_key.strip()
+        return self.get_setting("api_key")
+
+    def set_api_key(self, key: str | None):
+        """
+        Persist the API key in app_settings. If key is None/empty, stores empty string.
+        NOTE: SQLite is plain text; use ENV for sensitive deployments.
+        """
+        self.set_setting("api_key", (key or "").strip())
+
+    # Convenience wrappers used by UI
     def get_current_plan_id(self) -> Optional[int]:
         val = self.get_setting("current_plan_id")
         try:
@@ -188,7 +262,10 @@ class DatabaseManager:
             cur = conn.execute("SELECT * FROM plans ORDER BY created_at DESC")
             return [dict(r) for r in cur.fetchall()]
 
-    # Baseline
+    # ------------------------------------------------------------------ #
+    # Baseline runs
+    # ------------------------------------------------------------------ #
+
     def create_baseline_run(self, baseline: Dict[str, Any]) -> int:
         with self.get_connection() as conn:
             cur = conn.execute(
@@ -382,7 +459,7 @@ class DatabaseManager:
         Returns the template id.
         """
         with self.get_connection() as conn:
-            cur = conn.execute(
+            conn.execute(
                 """
                 INSERT INTO workout_templates
                     (name, workout_type, planned_distance, planned_intensity, description, notes)
@@ -403,7 +480,7 @@ class DatabaseManager:
                     tpl.get("notes"),
                 ),
             )
-            # Re-select to get id even on update
+            # Return current id (works for both insert & update)
             cur = conn.execute("SELECT id FROM workout_templates WHERE name = ?", (tpl["name"],))
             row = cur.fetchone()
             return row["id"] if row else 0
@@ -412,8 +489,22 @@ class DatabaseManager:
         with self.get_connection() as conn:
             conn.execute("DELETE FROM workout_templates WHERE id = ?", (template_id,))
 
+    # --- OpenAI settings (helpers) ---
+    def get_openai_settings(self) -> dict:
+        return {
+            "use_openai": (self.get_setting("use_openai") or "0") == "1",
+            "api_key": self.get_setting("openai_api_key") or "",
+            "model": self.get_setting("openai_model") or "gpt-4o-mini",
+        }
+
+    def set_openai_settings(self, use_openai: bool, api_key: str, model: str):
+        self.set_setting("use_openai", "1" if use_openai else "0")
+        self.set_setting("openai_api_key", api_key or "")
+        self.set_setting("openai_model", model or "gpt-4o-mini")
+
+
     # ------------------------------------------------------------------ #
-    # Status / queries used by dashboard & AI
+    # Status / AI usage
     # ------------------------------------------------------------------ #
 
     def get_next_key_workout(self, plan_id: int, from_date: str) -> Optional[Dict[str, Any]]:
@@ -446,3 +537,19 @@ class DatabaseManager:
             )
             row = cur.fetchone()
             return dict(row) if row else None
+
+    def log_api_call(self, call_type: str, plan_id: int | None, tokens_used: int | None, cost_usd: float | None):
+        with self.get_connection() as conn:
+            conn.execute(
+                "INSERT INTO api_calls (plan_id, call_type, tokens_used, cost_usd) VALUES (?, ?, ?, ?)",
+                (plan_id, call_type, tokens_used, cost_usd),
+            )
+
+    def get_api_totals(self) -> dict:
+        with self.get_connection() as conn:
+            cur = conn.execute(
+                "SELECT COUNT(*) AS n, COALESCE(SUM(tokens_used),0) AS tokens, "
+                "COALESCE(SUM(cost_usd),0.0) AS cost FROM api_calls"
+            )
+            row = cur.fetchone()
+            return {"calls": row["n"], "tokens": row["tokens"], "cost": float(row["cost"])}

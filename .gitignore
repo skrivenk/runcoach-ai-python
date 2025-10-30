@@ -45,21 +45,23 @@ wheels/
 .nox/
 .pytest_cache/
 htmlcov/
+.cache/
 
 # --- Databases ---
 *.db
+*.db-shm
+*.db-wal
 *.sqlite
 *.sqlite3
+runcoach.db
 
 # --- Qt / PySide / PyQt ---
-*.pyc
 *.qmlc
 *.qrc
 *.qrc.py
 *.ui~
 *_rc.py
-# optional: ignore generated .ui python converters
-ui_*.py
+ui_*.py   # generated UI python
 
 # --- IDEs / Editors ---
 .idea/
@@ -71,6 +73,7 @@ ui_*.py
 .pydevproject
 .settings/
 .spyproject/
+*.iml
 
 # --- OS / System ---
 .DS_Store
@@ -79,9 +82,10 @@ Thumbs.db
 desktop.ini
 $RECYCLE.BIN/
 
-# --- Environment variables / keys ---
+# --- Environment variables / secrets ---
 .env
 .env.*
+*.env
 !.env.example
 
 # --- Packaging / installers ---
@@ -91,8 +95,7 @@ MANIFEST
 # --- Jupyter / notebooks ---
 .ipynb_checkpoints/
 
-# --- Misc / temporary ---
-.cache/
-*.log
-*.bak
-*.tmp
+# --- AppData caches / local app state ---
+.runcoach/
+RunCoach/
+

@@ -1,157 +1,139 @@
-"""Main Window for RunCoach AI"""
+# main_window.py
+from __future__ import annotations
 
-from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-                              QLabel, QPushButton, QStackedWidget, QMessageBox)
+import sys
+from typing import Optional
+
 from PySide6.QtCore import Qt
-from ui.welcome_screen import WelcomeScreen
-from ui.calendar_view import CalendarView
-from ui.settings_dialog import SettingsDialog  # NEW
+from PySide6.QtWidgets import (
+    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QMessageBox, QFileDialog,
+    QStatusBar, QToolBar  # <-- add these
+)
+from PySide6.QtGui import QAction, QIcon, QKeySequence
 
+from database.db_manager import DatabaseManager
+from ui.calendar_view import CalendarView
+from ui.settings_dialog import SettingsDialog
 
 class MainWindow(QMainWindow):
-    def __init__(self, db_manager):
-        super().__init__()
-        self.db_manager = db_manager
-        self.current_plan = None
-
-        self.setWindowTitle("🏃 RunCoach AI")
-        self.setMinimumSize(1000, 700)
+    def __init__(self, db_manager: Optional[DatabaseManager] = None, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.setWindowTitle("RunCoach AI")
         self.resize(1200, 800)
 
-        self.init_ui()
-        self.apply_styles()
+        self.db = db_manager or DatabaseManager()
+        self.statusbar = QStatusBar(self)
+        self.setStatusBar(self.statusbar)
 
-    def init_ui(self):
-        central_widget = QWidget()
-        self.setCentralWidget(central_widget)
+        # Central UI
+        self.calendar_view = CalendarView(db_manager=self.db)
 
-        main_layout = QVBoxLayout()
-        main_layout.setContentsMargins(0, 0, 0, 0)
-        main_layout.setSpacing(0)
+        central = QWidget(self)
+        lay = QVBoxLayout(central)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.addWidget(self.calendar_view)
+        self.setCentralWidget(central)
 
-        header = self.create_header()
-        main_layout.addWidget(header)
+        # Menus / actions
+        self._build_menus()
 
-        self.stack = QStackedWidget()
+        # Apply AI config from DB to Calendar
+        self._apply_ai_config_to_calendar()
 
-        self.welcome_screen = WelcomeScreen()
-        self.calendar_view = CalendarView(self.db_manager)
+        # If you keep the "current plan id" in settings, you can select it here:
+        # pid = self.db.get_current_plan_id()
+        # if pid:
+        #     plan = self.db.get_plan_by_id(pid)
+        #     if plan:
+        #         self.calendar_view.set_current_plan(plan)
 
-        self.stack.addWidget(self.welcome_screen)
-        self.stack.addWidget(self.calendar_view)
+    # ---------------- Menus ----------------
 
-        main_layout.addWidget(self.stack)
+    def _build_menus(self):
+        menubar = self.menuBar()
 
-        # If you later wire Import Plan:
-        # self.welcome_screen.import_plan_requested.connect(self.show_import_dialog)
+        # App menu
+        app_menu = menubar.addMenu("&App")
 
-        central_widget.setLayout(main_layout)
+        act_settings = QAction("Settings…", self)
+        act_settings.setStatusTip("Configure OpenAI and application preferences")
+        act_settings.triggered.connect(self._open_settings)
+        app_menu.addAction(act_settings)
 
-        self.check_for_plans()
-        self._apply_planner_config_from_db()  # load settings on startup
+        app_menu.addSeparator()
 
-    def create_header(self) -> QWidget:
-        header = QWidget()
-        header.setObjectName("header")
-        header.setFixedHeight(70)
+        act_quit = QAction("Quit", self)
+        act_quit.setShortcut("Ctrl+Q")
+        act_quit.triggered.connect(self.close)
+        app_menu.addAction(act_quit)
 
-        layout = QHBoxLayout()
-        layout.setContentsMargins(24, 0, 24, 0)
+        # File menu (optional placeholders for future import/export)
+        file_menu = menubar.addMenu("&File")
 
-        title = QLabel("🏃 RunCoach AI")
-        title.setObjectName("title")
+        act_export = QAction("Export…", self)
+        act_export.setEnabled(False)  # wire this up later
+        file_menu.addAction(act_export)
 
-        layout.addWidget(title)
-        layout.addStretch()
+        act_import = QAction("Import…", self)
+        act_import.setEnabled(False)  # wire this up later
+        file_menu.addAction(act_import)
 
-        settings_btn = QPushButton("Settings")
-        settings_btn.setObjectName("headerButton")
-        settings_btn.clicked.connect(self.show_settings)
+        # Help menu
+        help_menu = menubar.addMenu("&Help")
+        act_about = QAction("About", self)
+        act_about.triggered.connect(self._about)
+        help_menu.addAction(act_about)
 
-        layout.addWidget(settings_btn)
+    # ------------- Settings / AI config -------------
 
-        header.setLayout(layout)
-        return header
+    def _open_settings(self):
+        dlg = SettingsDialog(self, self.db)
+        if dlg.exec():  # user pressed Save
+            self._apply_ai_config_to_calendar()
+            self.statusBar().showMessage("Settings saved.", 2500)
 
-    def check_for_plans(self):
-        current_plan_id = self.db_manager.get_current_plan_id()
-        if not current_plan_id:
-            self.stack.setCurrentWidget(self.welcome_screen)
-            return
+    def _apply_ai_config_to_calendar(self):
+        """
+        Pulls OpenAI settings from DB and configures the Calendar's planner.
+        Keeps compatibility if the planner doesn't support model parameter.
+        """
+        cfg = self.db.get_openai_settings()
+        # Preferred path: the CalendarView exposes configure_planner()
+        try:
+            self.calendar_view.configure_planner(
+                use_openai=cfg["use_openai"],
+                api_key=cfg["api_key"],
+            )
+        except Exception:
+            pass
 
-        plan = self.db_manager.get_plan_by_id(current_plan_id)
-        if not plan:
-            self.stack.setCurrentWidget(self.welcome_screen)
-            return
+        # If your AIPlanner supports model in set_config, apply it, too
+        try:
+            self.calendar_view._planner.set_config(
+                use_openai=cfg["use_openai"],
+                api_key=cfg["api_key"],
+                model=cfg["model"],
+            )
+        except Exception:
+            pass
 
-        self.calendar_view.set_current_plan(plan)
-        self.stack.setCurrentWidget(self.calendar_view)
+    # ---------------- Misc ----------------
 
-    def show_plan_wizard(self):
-        """Show the plan creation wizard"""
-        from ui.plan_wizard import PlanWizard
-        wizard = PlanWizard(self)
-        wizard.plan_created.connect(self.on_plan_created)
-        wizard.exec()
+    def _about(self):
+        QMessageBox.information(
+            self,
+            "About RunCoach AI",
+            "RunCoach AI\n• Calendar-based planning\n• Optional OpenAI-powered weekly suggestions\n"
+            "• Local SQLite database in your user directory"
+        )
 
-    def on_plan_created(self, plan_data: dict):
-        plan_id = self.db_manager.create_plan(plan_data)
 
-        # Optional baseline
-        if plan_data.get("baseline_distance") and plan_data.get("baseline_time"):
-            baseline = {
-                "plan_id": plan_id,
-                "date": plan_data["start_date"],
-                "distance": plan_data["baseline_distance"],
-                "time_seconds": plan_data["baseline_time"],
-                "rpe": plan_data.get("baseline_rpe"),
-                "avg_hr": None, "elevation_gain": None, "notes": None,
-            }
-            self.db_manager.create_baseline_run(baseline)
+def main():
+    app = QApplication(sys.argv)
+    win = MainWindow()
+    win.show()
+    sys.exit(app.exec())
 
-        # Seed a week so calendar shows something
-        from datetime import datetime, timedelta
-        start_dt = datetime.fromisoformat(plan_data["start_date"])
-        for i in range(7):
-            self.db_manager.create_workout({
-                "plan_id": plan_id,
-                "date": (start_dt + timedelta(days=i)).strftime("%Y-%m-%d"),
-                "workout_type": "easy" if i % 2 == 0 else "tempo",
-                "planned_distance": 5.0,
-                "planned_intensity": None,
-                "description": f"Day {i + 1} (initial seed)",
-                "notes": None,
-                "modified_by": "initial_gen",
-            })
 
-        self.db_manager.set_current_plan_id(plan_id)
-        self.check_for_plans()
-
-    # --- Settings ---
-
-    def _apply_planner_config_from_db(self):
-        """Read DB settings and push to CalendarView/AI planner."""
-        mode = (self.db_manager.get_setting("planner_mode") or "heuristic").lower()
-        key = self.db_manager.get_setting("openai_api_key")
-        use_openai = (mode == "openai" and bool(key))
-        self.calendar_view.configure_planner(use_openai=use_openai, api_key=key)
-
-    def show_settings(self):
-        dlg = SettingsDialog(self, db_manager=self.db_manager)
-        if dlg.exec():
-            # When saved, re-read and apply
-            self._apply_planner_config_from_db()
-            QMessageBox.information(self, "Settings", "Settings saved.")
-
-    def apply_styles(self):
-        self.setStyleSheet("""
-            QMainWindow { background-color: #f5f7fa; }
-            QWidget#header { background-color: #2c3e50; }
-            QLabel#title { color: white; font-size: 24px; font-weight: bold; }
-            QPushButton { background-color: #3498db; color: white; border: none; border-radius: 6px;
-                          padding: 10px 20px; font-size: 14px; font-weight: 500; }
-            QPushButton:hover { background-color: #2980b9; }
-            QPushButton:pressed { background-color: #21618c; }
-            QPushButton#headerButton { background-color: white; color: #2c3e50; border: 1px solid rgba(255,255,255,0.3); }
-            QPushButton#headerButton:hover { background-color: #ecf0f1; }
-        """)
+if __name__ == "__main__":
+    main()

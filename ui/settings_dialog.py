@@ -1,100 +1,78 @@
 # ui/settings_dialog.py
 from __future__ import annotations
 
-from typing import Optional
-from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QDialog, QVBoxLayout, QFormLayout, QComboBox, QLineEdit,
-    QHBoxLayout, QPushButton, QDialogButtonBox, QLabel
+    QDialog, QVBoxLayout, QFormLayout, QLineEdit, QDialogButtonBox,
+    QCheckBox, QHBoxLayout, QLabel, QComboBox, QWidget, QPushButton
 )
+from PySide6.QtCore import Qt
+from typing import Optional
 
+SUPPORTED_MODELS = [
+    "gpt-4o-mini",
+    "gpt-4.1-mini",
+]
 
 class SettingsDialog(QDialog):
     """
-    App settings:
-      - Planner engine: Heuristic (offline) or OpenAI
-      - OpenAI API Key (stored in app_settings)
+    Lets the user paste an OpenAI API key, enable/disable OpenAI,
+    and choose a model. Values are persisted via DatabaseManager.app_settings.
     """
-    def __init__(self, parent=None, db_manager=None):
+
+    def __init__(self, parent: Optional[QWidget], db_manager):
         super().__init__(parent)
         self.setWindowTitle("Settings")
-        self.resize(520, 260)
-
         self.db = db_manager
 
-        # UI
-        root = QVBoxLayout(self)
+        self.chk_use_openai = QCheckBox("Use OpenAI for weekly planning")
+        self.edit_api_key = QLineEdit()
+        self.edit_api_key.setEchoMode(QLineEdit.Password)
+        self.edit_api_key.setPlaceholderText("sk-... (stored locally in your user DB)")
+        self.cmb_model = QComboBox()
+        self.cmb_model.addItems(SUPPORTED_MODELS)
+
+        # Load from DB
+        use_flag = self.db.get_setting("use_openai") or "0"
+        api_key = self.db.get_setting("openai_api_key") or ""
+        model = self.db.get_setting("openai_model") or SUPPORTED_MODELS[0]
+
+        self.chk_use_openai.setChecked(use_flag == "1")
+        self.edit_api_key.setText(api_key)
+        if model in SUPPORTED_MODELS:
+            self.cmb_model.setCurrentText(model)
 
         form = QFormLayout()
-        form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        form.addRow(self.chk_use_openai)
+        form.addRow("OpenAI API Key:", self.edit_api_key)
+        form.addRow("Model:", self.cmb_model)
 
-        self.engine = QComboBox()
-        self.engine.addItems(["Heuristic (offline)", "OpenAI"])
-        self.engine.currentIndexChanged.connect(self._engine_changed)
-
-        self.api_key = QLineEdit()
-        self.api_key.setEchoMode(QLineEdit.Password)
-        self.api_key.setPlaceholderText("sk-...")
-
-        # Show/Hide key button
-        sh_layout = QHBoxLayout()
-        sh_layout.setSpacing(8)
-        sh_layout.addWidget(self.api_key, 1)
-        self.toggle_btn = QPushButton("Show")
-        self.toggle_btn.setCheckable(True)
-        self.toggle_btn.clicked.connect(self._toggle_echo)
-        sh_layout.addWidget(self.toggle_btn, 0, Qt.AlignRight)
-
-        form.addRow("Planner engine", self.engine)
-        form.addRow("OpenAI API key", sh_layout)
-
-        hint = QLabel("Note: OpenAI mode requires a valid API key and the 'openai' package installed.\n"
-                      "Your key is stored locally in the app database (app_settings).")
+        hint = QLabel("Tip: you can set OPENAI_API_KEY in your environment; "
+                      "the app prefers the saved key here if present.")
         hint.setWordWrap(True)
+        hint.setStyleSheet("color:#666; font-size:12px;")
 
-        root.addLayout(form)
-        root.addWidget(hint)
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._on_save)
+        buttons.rejected.connect(self.reject)
 
-        btns = QDialogButtonBox(QDialogButtonBox.Cancel | QDialogButtonBox.Save)
-        btns.accepted.connect(self._save)
-        btns.rejected.connect(self.reject)
-        root.addWidget(btns)
+        layout = QVBoxLayout(self)
+        layout.addLayout(form)
+        layout.addWidget(hint)
+        layout.addWidget(buttons)
 
-        self._load_settings()
-        self._engine_changed(self.engine.currentIndex())
+        self.setMinimumWidth(480)
 
-    # --- internal ---
+    def _on_save(self):
+        use_flag = "1" if self.chk_use_openai.isChecked() else "0"
+        self.db.set_setting("use_openai", use_flag)
 
-    def _toggle_echo(self, checked: bool):
-        self.api_key.setEchoMode(QLineEdit.Normal if checked else QLineEdit.Password)
-        self.toggle_btn.setText("Hide" if checked else "Show")
-
-    def _engine_changed(self, idx: int):
-        use_openai = (idx == 1)
-        self.api_key.setEnabled(use_openai)
-
-    def _load_settings(self):
-        # planner_mode ∈ {"heuristic", "openai"}
-        mode = (self.db.get_setting("planner_mode") or "heuristic").lower() if self.db else "heuristic"
-        key = self.db.get_setting("openai_api_key") if self.db else None
-
-        self.engine.setCurrentIndex(1 if mode == "openai" else 0)
+        # Save key only if user typed something (empty = keep/remove)
+        key = self.edit_api_key.text().strip()
         if key:
-            self.api_key.setText(key)
-
-    def _save(self):
-        if not self.db:
-            self.reject()
-            return
-
-        mode = "openai" if self.engine.currentIndex() == 1 else "heuristic"
-        key = self.api_key.text().strip() or None
-
-        self.db.set_setting("planner_mode", mode)
-        if key is not None:
             self.db.set_setting("openai_api_key", key)
         else:
-            # Optional: clear stored key by setting empty
+            # allow clearing the key
             self.db.set_setting("openai_api_key", "")
 
+        self.db.set_setting("openai_model", self.cmb_model.currentText())
         self.accept()
