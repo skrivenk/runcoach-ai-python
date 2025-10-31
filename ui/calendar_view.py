@@ -8,9 +8,9 @@ from typing import List, Dict, Optional
 
 from PySide6.QtWidgets import (
     QWidget, QScrollArea, QSizePolicy, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QGridLayout, QFrame, QMenu, QMessageBox, QToolButton
+    QGridLayout, QFrame, QMenu, QMessageBox, QToolButton, QApplication, QStyle
 )
-from PySide6.QtCore import Qt, QDate, QLocale, QEvent
+from PySide6.QtCore import Qt, QDate, QLocale, QEvent, QTimer
 from PySide6.QtGui import QCursor, QFontMetrics
 
 from ui.workout_dialogs import AddEditWorkoutDialog, CompleteWorkoutDialog
@@ -53,7 +53,7 @@ class CalendarView(QWidget):
         self.recalc_btn: Optional[QPushButton] = None
         self.status_content: Optional[QLabel] = None
 
-        # AI planner facade (configurable at runtime)
+        # AI planner
         self._planner = AIPlanner(use_openai=False, api_key=None)
 
         self.init_ui()
@@ -61,7 +61,6 @@ class CalendarView(QWidget):
     # --- Planner config from outside (MainWindow) ---
 
     def configure_planner(self, use_openai: bool, api_key: Optional[str]):
-        """Called by MainWindow after Settings are saved."""
         self._planner.set_config(use_openai=use_openai, api_key=api_key)
 
     # --- Public API for MainWindow ---
@@ -93,22 +92,18 @@ class CalendarView(QWidget):
     # --- UI construction ---
 
     def init_ui(self):
-        # Outer page layout (header above, scroll area below, status at bottom)
         page = QVBoxLayout()
         page.setContentsMargins(16, 16, 16, 16)
         page.setSpacing(12)
 
-        # HEADER (outside scroll area)
         header = self.create_header()
         page.addWidget(header)
 
-        # SCROLL AREA (weekday headers + calendar grid)
         scroller = QScrollArea()
         scroller.setObjectName("calendarScroll")
         scroller.setWidgetResizable(True)
         scroller.setFrameShape(QFrame.NoFrame)
         scroller.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        scroller.setViewportMargins(0, 0, 18, 0)
         self.scroll = scroller
 
         scroll_content = QFrame()
@@ -133,7 +128,6 @@ class CalendarView(QWidget):
         scroller.setWidget(scroll_content)
         page.addWidget(scroller)
 
-        # STATUS (bottom)
         status = self.create_status_window()
         page.addWidget(status)
 
@@ -156,7 +150,6 @@ class CalendarView(QWidget):
         header_layout.setSpacing(8)
         header_layout.setContentsMargins(0, 0, 0, 0)
 
-        # Navigation group (prev, label, next)
         nav_group = QWidget()
         nav_layout = QHBoxLayout(nav_group)
         nav_layout.setSpacing(8)
@@ -181,10 +174,8 @@ class CalendarView(QWidget):
         nav_layout.addWidget(prev_btn)
         nav_layout.addWidget(self.month_label)
         nav_layout.addWidget(next_btn)
-
         nav_group.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
 
-        # Recalculate button pinned to the right
         self.recalc_btn = QPushButton("🔄 Recalculate")
         self.recalc_btn.setObjectName("actionButton")
         self.recalc_btn.setCursor(QCursor(Qt.PointingHandCursor))
@@ -203,14 +194,11 @@ class CalendarView(QWidget):
         layout = QHBoxLayout(container)
         layout.setSpacing(8)
         layout.setContentsMargins(0, 0, 0, 0)
-
-        weekdays = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
-        for day in weekdays:
-            label = QLabel(day)
-            label.setObjectName("weekdayHeader")
-            label.setAlignment(Qt.AlignCenter)
-            layout.addWidget(label)
-
+        for day in ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]:
+            lbl = QLabel(day)
+            lbl.setObjectName("weekdayHeader")
+            lbl.setAlignment(Qt.AlignCenter)
+            layout.addWidget(lbl)
         return container
 
     # --- Calendar rendering ---
@@ -257,9 +245,20 @@ class CalendarView(QWidget):
         self._apply_cell_sizes()
         self._compact_header_if_needed()
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        # Defer one tick so the viewport reports a stable width
+        QTimer.singleShot(0, self._apply_cell_sizes)
+
     def _viewport_width(self) -> int:
         if self.scroll and self.scroll.viewport():
-            return self.scroll.viewport().width()
+            vp = self.scroll.viewport()
+            w = vp.width()
+            # If a vertical scrollbar appears, the reported viewport width is already reduced,
+            # but on some platforms/layouts we can still be conservative and subtract a few px.
+            sb_w = QApplication.style().pixelMetric(QStyle.PM_ScrollBarExtent)
+            # Subtract a tiny cushion to avoid rounding overflow in cell width calc
+            return max(600, w - 2)
         return max(600, self.width() - 40)
 
     def _apply_cell_sizes(self):
@@ -269,7 +268,7 @@ class CalendarView(QWidget):
         spacing = self.grid_layout.horizontalSpacing() or 0
         cols = 7
         cell_w = max(90, int((avail_w - (spacing * (cols - 1)) - 2) / cols))
-        cell_h = max(88, int(cell_w * 0.78))  # slightly taller for badges
+        cell_h = max(88, int(cell_w * 0.78))
 
         for i in range(self.grid_layout.count()):
             w = self.grid_layout.itemAt(i).widget()
@@ -279,7 +278,7 @@ class CalendarView(QWidget):
             w.setMaximumSize(16777215, 16777215)
             w.setFixedSize(cell_w, cell_h)
 
-        self.grid_container.setMinimumWidth(avail_w)
+        self.grid_container.setMinimumWidth(max(avail_w - 2, 0))
 
     def _compact_header_if_needed(self):
         try:
@@ -292,7 +291,7 @@ class CalendarView(QWidget):
         except Exception:
             pass
 
-    # --- Day cell creation + tooltips/badges ---
+    # --- Day cells / badges / tooltips ---
 
     def _build_tooltip_html(self, date_str: str, workouts_for_day: List[Dict]) -> str:
         if not workouts_for_day:
@@ -337,7 +336,6 @@ class CalendarView(QWidget):
         outer.setContentsMargins(8, 8, 8, 8)
         outer.setSpacing(4)
 
-        # Top row: date number + completion/more badges
         top_row = QHBoxLayout()
         top_row.setSpacing(6)
         day_label = QLabel(str(date.day()))
@@ -350,16 +348,13 @@ class CalendarView(QWidget):
 
         any_completed = any(w.get("completed") for w in workouts_for_day)
         if any_completed:
-            comp_badge = self._make_chip("✓", "chipDone")
-            top_row.addWidget(comp_badge)
+            top_row.addWidget(self._make_chip("✓", "chipDone"))
 
         if len(workouts_for_day) > 1:
-            more_badge = self._make_chip(f"+{len(workouts_for_day)-1}", "chipMore")
-            top_row.addWidget(more_badge)
+            top_row.addWidget(self._make_chip(f"+{len(workouts_for_day)-1}", "chipMore"))
 
         outer.addLayout(top_row)
 
-        # Type chips (up to 2 to avoid clutter)
         chips_row = QHBoxLayout()
         chips_row.setSpacing(4)
         if workouts_for_day:
@@ -383,7 +378,6 @@ class CalendarView(QWidget):
                     break
         outer.addLayout(chips_row)
 
-        # Primary distance
         if workouts_for_day and workouts_for_day[0].get("planned_distance") is not None:
             dist = QLabel(f"{float(workouts_for_day[0]['planned_distance']):.1f} mi")
             dist.setObjectName("workoutDistance")
@@ -395,17 +389,14 @@ class CalendarView(QWidget):
             outer.addWidget(no_workout)
 
         cell.setLayout(outer)
-
-        # Tooltip
         cell.setToolTip(self._build_tooltip_html(date_str, workouts_for_day))
 
-        # Mouse behavior
         def _mouse_press(ev):
             if ev.button() == Qt.RightButton:
                 self._open_context_menu(date_str, workouts_for_day, cell.mapToGlobal(ev.pos()))
                 return
             if ev.button() == Qt.LeftButton and ev.type() == QEvent.MouseButtonPress:
-                return  # swallow single-press
+                return
 
         def _mouse_double_click(ev):
             if ev.button() == Qt.LeftButton:
@@ -465,7 +456,6 @@ class CalendarView(QWidget):
         dlg.exec()
 
     def _move_or_copy_workout(self, date_str: str, workout: dict):
-        """Open dialog to move/copy a workout to another date."""
         if not (self.db_manager and self.current_plan and workout):
             return
         dlg = MoveCopyDialog(self, current_date_str=date_str)
@@ -478,10 +468,8 @@ class CalendarView(QWidget):
         mode = result["mode"]  # 'move' | 'copy'
 
         if mode == "move":
-            # Just update this workout's date
             self.db_manager.update_workout(workout["id"], {"date": new_date, "modified_by": "reschedule"})
         else:
-            # Copy: clone most fields into a new row with new date
             payload = {
                 "plan_id": self.current_plan["id"],
                 "date": new_date,
@@ -573,11 +561,9 @@ class CalendarView(QWidget):
 
         recent = self._recent_completed_workouts(weeks=3)
 
-        # ---- Call planner (might return list OR (list, usage)) ----
+        # Call planner (list) OR (list, usage)
         result = self._planner.plan_week(ctx, week_dates, recent)
-
         usage = None
-        suggestions: List[WorkoutSuggestion]
         if isinstance(result, tuple) and len(result) == 2:
             suggestions, usage = result
         else:
@@ -654,9 +640,32 @@ class CalendarView(QWidget):
             cur = cur.addDays(1)
         return out
 
+    def refresh_status(self):
+        """Public call to refresh the status dashboard; safe to call anytime."""
+        self.update_status_dashboard()
+
     def update_status_dashboard(self):
-        if not (self.db_manager and self.current_plan and self.status_content):
+        if not self.status_content:
             return
+
+        # --- Always show API totals ---
+        api_line = ""
+        if self.db_manager:
+            try:
+                totals = self.db_manager.get_api_totals()
+                calls = totals.get("calls", 0)
+                tokens = totals.get("tokens", 0)
+                cost = totals.get("cost", 0.0)
+                api_line = f"\nAPI Usage: {calls} calls, ~{tokens} tokens, ~${cost:.4f}"
+            except Exception:
+                api_line = ""
+
+        # If plan isn't ready yet, still show API usage and a neutral message
+        if not (self.db_manager and self.current_plan):
+            self.status_content.setText(f"Status: No plan selected.{api_line}")
+            return
+
+        # --- Weekly status with plan ---
         week_start, week_end = self._current_week_range()
         workouts = self.db_manager.get_workouts_between_dates(
             self.current_plan["id"], week_start, week_end, current_only=True
@@ -685,9 +694,11 @@ class CalendarView(QWidget):
         today_str = QDate.currentDate().toString("yyyy-MM-dd")
         key = self.db_manager.get_next_key_workout(self.current_plan["id"], today_str)
         if key:
-            key_when = key.get("date"); key_type = (key.get("workout_type") or "").upper()
+            key_when = key.get("date");
+            key_type = (key.get("workout_type") or "").upper()
             key_dist = key.get("planned_distance")
-            key_line = f"Next Key Workout: {key_when} {key_type}" + (f" {float(key_dist):.1f} mi" if key_dist is not None else "")
+            key_line = f"Next Key Workout: {key_when} {key_type}" + (
+                f" {float(key_dist):.1f} mi" if key_dist is not None else "")
         else:
             key_line = "Next Key Workout: —"
         if pct >= 85:
@@ -700,7 +711,7 @@ class CalendarView(QWidget):
             f"{status_emoji} Goal Attainability: {pct:.0f}% ({status_text})\n"
             f"Week Progress ({week_start}…{week_end}): {actual:.1f}/{planned:.1f} miles "
             f"({completed_count}/{total_count} workouts completed)\n"
-            f"{key_line}"
+            f"{key_line}{api_line}"
         )
         self.status_content.setText(status)
 
@@ -726,7 +737,6 @@ class CalendarView(QWidget):
         header.addWidget(title)
         header.addStretch()
         header.addWidget(self.expand_btn)
-
         layout.addLayout(header)
 
         self.status_content = QLabel("Loading…")
@@ -741,9 +751,10 @@ class CalendarView(QWidget):
         if self.status_content:
             self.status_content.setVisible(self._status_expanded)
         if self.expand_btn:
-            self.expand_btn.setArrowType(Qt.UpArrow if self._status_expanded else Qt.DownArrow)
+            # When collapsed, show Up (click will expand); when expanded, show Down (click will collapse)
+            self.expand_btn.setArrowType(Qt.DownArrow if self._status_expanded else Qt.UpArrow)
 
-    # --- Navigation / helpers ---
+    # --- Navigation ---
 
     def update_month_label(self):
         self.month_label.setText(self.current_date.toString("MMMM yyyy"))
@@ -786,7 +797,6 @@ class CalendarView(QWidget):
             QLabel#completedLabel { font-size: 10px; color: #27ae60; margin-top: 4px; }
             QLabel#noWorkout { font-size: 20px; color: #bdc3c7; margin-top: 8px; }
 
-            /* Chips */
             QLabel#chipDone, QLabel#chipMore, QLabel#chipEasy, QLabel#chipTempo, QLabel#chipIntervals, QLabel#chipLong, QLabel#chipRest {
                 border-radius: 10px; padding: 2px 6px; font-size: 11px; font-weight: 600; min-width: 16px;
             }

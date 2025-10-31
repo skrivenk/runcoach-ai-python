@@ -5,31 +5,13 @@ import json
 from dataclasses import dataclass
 from typing import List, Optional, Dict, Any, Tuple
 
-# OpenAI is optional; import defensively so the app still runs without it.
+# OpenAI is optional; import lazily
 _OPENAI_AVAILABLE = False
 try:
-    from openai import OpenAI  # SDK v1.x
+    from openai import OpenAI  # SDK v2.x
     _OPENAI_AVAILABLE = True
 except Exception:
     pass
-
-
-# ---- rough/adjustable pricing (USD per 1M tokens) ----
-_MODEL_PRICING: Dict[str, Dict[str, float]] = {
-    # Adjust to whatever model/pricing you actually use
-    "gpt-4o-mini": {"input": 0.15, "output": 0.60},
-    "gpt-4.1-mini": {"input": 0.30, "output": 1.20},
-}
-
-
-def _estimate_cost(model: str, prompt_tokens: Optional[int], completion_tokens: Optional[int]) -> Optional[float]:
-    try:
-        p = _MODEL_PRICING.get((model or "").lower())
-        if not p or prompt_tokens is None or completion_tokens is None:
-            return None
-        return (prompt_tokens * p["input"] + completion_tokens * p["output"]) / 1_000_000.0
-    except Exception:
-        return None
 
 
 @dataclass
@@ -58,9 +40,25 @@ class WorkoutSuggestion:
 
 class AIPlanner:
     """
-    Facade the calendar uses. If OpenAI is enabled + key present, we call the API.
-    Otherwise we fall back to a deterministic heuristic.
+    Facade used by the Calendar. If OpenAI is enabled + key present, calls the API,
+    otherwise falls back to a deterministic heuristic so the app always works.
     """
+
+    _MODEL_PRICING = {
+        # Rough placeholders (USD per 1M tokens). Adjust to your contract if needed.
+        "gpt-4o-mini": {"input": 0.15, "output": 0.60},
+        "gpt-4.1-mini": {"input": 0.30, "output": 1.20},
+    }
+
+    @staticmethod
+    def _estimate_cost(model: str, prompt_tokens: Optional[int], completion_tokens: Optional[int]) -> Optional[float]:
+        try:
+            p = AIPlanner._MODEL_PRICING.get((model or "").lower())
+            if not p or prompt_tokens is None or completion_tokens is None:
+                return None
+            return (prompt_tokens * p["input"] + completion_tokens * p["output"]) / 1_000_000.0
+        except Exception:
+            return None
 
     def __init__(self, use_openai: bool = False, api_key: Optional[str] = None, model: str = "gpt-4o-mini"):
         self._use_openai = bool(use_openai)
@@ -73,42 +71,61 @@ class AIPlanner:
         if model:
             self._model = model
 
-    # ---------------------- public ----------------------
+    # ---------------- Public ----------------
+
+    def ping(self) -> Tuple[bool, str, Optional[dict]]:
+        """
+        Lightweight test call to verify API key/model. Returns (ok, message, usage|None).
+        Never raises out to caller.
+        """
+        if not (self._use_openai and self._api_key and _OPENAI_AVAILABLE):
+            return False, "OpenAI is disabled or not configured.", None
+
+        try:
+            client = OpenAI(api_key=self._api_key)
+            resp = client.responses.create(
+                model=self._model,
+                input=[{"role": "user", "content": "Reply with the single word OK."}],
+                temperature=0.0,
+            )
+            text = _extract_text(resp).strip()
+            ok = text.upper().startswith("OK")
+            usage = _safe_usage_dict(resp)
+            if ok:
+                return True, "Round-trip succeeded.", usage
+            return False, f"Unexpected response text: {text[:80]}", usage
+        except Exception as e:
+            return False, f"{type(e).__name__}: {e}", None
 
     def plan_week(
         self,
         ctx: PlanContext,
         week_dates: List[str],
         recent_workouts: List[Dict[str, Any]],
-    ) -> Tuple[List[WorkoutSuggestion], Dict[str, Any]]:
+    ) -> List[WorkoutSuggestion] | Tuple[List[WorkoutSuggestion], dict]:
         """
-        Returns (suggestions, usage_dict).
-        suggestions: list[WorkoutSuggestion] (7 items; 'rest' allowed)
-        usage_dict:  {'prompt_tokens','completion_tokens','total_tokens','estimated_cost_usd','model'}
+        Return a list of WorkoutSuggestion (one per input date).
+        If OpenAI path runs, returns (suggestions, usage_dict).
         """
         if self._use_openai and self._api_key and _OPENAI_AVAILABLE:
             try:
                 return self._plan_with_openai(ctx, week_dates, recent_workouts)
             except Exception:
-                # Fall back gracefully if the API call fails
+                # Fall back gracefully
                 return self._plan_heuristic(ctx, week_dates, recent_workouts)
         else:
             return self._plan_heuristic(ctx, week_dates, recent_workouts)
 
-    # ---------------------- implementations ----------------------
+    # --------------- Implementations ---------------
 
     def _plan_with_openai(
         self,
         ctx: PlanContext,
         week_dates: List[str],
         recent_workouts: List[Dict[str, Any]],
-    ) -> Tuple[List[WorkoutSuggestion], Dict[str, Any]]:
-        """
-        Calls OpenAI Responses API and expects strict JSON back.
-        """
+    ) -> Tuple[List[WorkoutSuggestion], dict]:
         client = OpenAI(api_key=self._api_key)
 
-        # Compact the recent list so we don’t blow up token usage
         compact_recent = [
             {
                 "date": r.get("date"),
@@ -123,21 +140,14 @@ class AIPlanner:
         ]
 
         system_msg = (
-            "You are an experienced running coach. "
-            "Given a training context and a list of dates (one week), create a simple plan. "
-            "Output STRICT JSON: an array with 7 objects, one per input date, each with keys: "
+            "You are an experienced running coach. Given a training context and a list of dates (one week), "
+            "produce a STRICT JSON array with 7 objects—one per date—with keys:\n"
             "date (YYYY-MM-DD), workout_type (easy|tempo|intervals|long|recovery|rest), "
-            "planned_distance (miles, number or null), planned_intensity (string or null), description (string or null). "
-            "Distances must be reasonable for recreational runners and consistent with goal_type. "
-            "Use 'rest' for days off. If unsure, prefer easier options."
+            "planned_distance (miles or null), planned_intensity (string or null), description (string or null). "
+            "Distances must be reasonable for recreational runners and consistent with goal_type. Prefer easier options when unsure."
         )
-
         user_msg = json.dumps(
-            {
-                "context": ctx.__dict__,
-                "week_dates": week_dates,
-                "recent_workouts": compact_recent,
-            },
+            {"context": ctx.__dict__, "week_dates": week_dates, "recent_workouts": compact_recent},
             ensure_ascii=False,
         )
 
@@ -150,61 +160,44 @@ class AIPlanner:
             temperature=0.7,
         )
 
-        # ---- parse content ----
         text = _extract_text(resp)
         data = json.loads(text)
 
-        suggestions: List[WorkoutSuggestion] = []
-        for item in data:
-            suggestions.append(
-                WorkoutSuggestion(
-                    date=item.get("date"),
-                    workout_type=(item.get("workout_type") or "easy").lower(),
-                    planned_distance=_to_float_or_none(item.get("planned_distance")),
-                    planned_intensity=item.get("planned_intensity"),
-                    description=item.get("description"),
-                )
+        suggestions: List[WorkoutSuggestion] = [
+            WorkoutSuggestion(
+                date=item.get("date"),
+                workout_type=(item.get("workout_type") or "easy").lower(),
+                planned_distance=_to_float_or_none(item.get("planned_distance")),
+                planned_intensity=item.get("planned_intensity"),
+                description=item.get("description"),
             )
+            for item in data
+        ]
 
-        # Preserve order of the incoming week_dates (fill with 'rest' if missing)
+        # Keep order aligned to week_dates
         by_date = {s.date: s for s in suggestions if s.date}
         ordered = [by_date.get(d) or WorkoutSuggestion(d, "rest") for d in week_dates]
 
-        # ---- usage/cost ----
-        prompt_toks = None
-        completion_toks = None
-        total_toks = None
-        try:
-            usage = getattr(resp, "usage", None)
-            if usage:
-                prompt_toks = getattr(usage, "input_tokens", None) or getattr(usage, "prompt_tokens", None)
-                completion_toks = getattr(usage, "output_tokens", None) or getattr(usage, "completion_tokens", None)
-                total_toks = getattr(usage, "total_tokens", None)
-        except Exception:
-            pass
+        usage = _safe_usage_dict(resp)
+        usage["estimated_cost_usd"] = AIPlanner._estimate_cost(
+            self._model, usage.get("prompt_tokens"), usage.get("completion_tokens")
+        )
+        usage["model"] = self._model
 
-        return ordered, {
-            "prompt_tokens": prompt_toks,
-            "completion_tokens": completion_toks,
-            "total_tokens": total_toks,
-            "estimated_cost_usd": _estimate_cost(self._model, prompt_toks, completion_toks),
-            "model": self._model,
-        }
+        return ordered, usage
 
     def _plan_heuristic(
         self,
         ctx: PlanContext,
         week_dates: List[str],
         recent_workouts: List[Dict[str, Any]],
-    ) -> Tuple[List[WorkoutSuggestion], Dict[str, Any]]:
-        """
-        Very simple non-AI filler that respects long_run_day and max training days.
-        """
+    ) -> List[WorkoutSuggestion]:
+        """Very simple non-AI filler respecting long_run_day and max training days."""
         long_day = (ctx.long_run_day or "Sunday").lower()
         weekday_names = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
 
-        # Crude mileage guess from recent average
-        distances = []
+        # crude mileage guess from recent average
+        distances: List[float] = []
         for r in recent_workouts:
             d = r.get("actual_distance") or r.get("planned_distance")
             if isinstance(d, (int, float)):
@@ -214,10 +207,9 @@ class AIPlanner:
         suggestions: List[WorkoutSuggestion] = []
         used_days = 0
         for d in week_dates:
-            idx = _weekday_index(d)  # 0=Mon ... 6=Sun
+            idx = _weekday_index(d)  # 0=Mon..6=Sun
             name = weekday_names[idx]
 
-            # Long run
             if name == long_day and used_days < ctx.max_days_per_week:
                 used_days += 1
                 suggestions.append(
@@ -231,12 +223,10 @@ class AIPlanner:
                 )
                 continue
 
-            # Cap by max days/week
             if used_days >= ctx.max_days_per_week:
                 suggestions.append(WorkoutSuggestion(date=d, workout_type="rest"))
                 continue
 
-            # Simple weekly pattern
             if name in ("tuesday",):
                 used_days += 1
                 suggestions.append(
@@ -273,51 +263,45 @@ class AIPlanner:
             else:
                 suggestions.append(WorkoutSuggestion(date=d, workout_type="rest"))
 
-        return suggestions, {
-            "prompt_tokens": None,
-            "completion_tokens": None,
-            "total_tokens": None,
-            "estimated_cost_usd": None,
-            "model": "heuristic",
-        }
+        return suggestions
 
 
-# ---------------------- helpers ----------------------
+# ---------------- Helpers ----------------
 
 def _weekday_index(date_str: str) -> int:
     from datetime import datetime as _dt
-    dt = _dt.strptime(date_str, "%Y-%m-%d")
-    return dt.weekday()  # 0=Mon ... 6=Sun
+    return _dt.strptime(date_str, "%Y-%m-%d").weekday()  # 0=Mon..6=Sun
 
 
 def _to_float_or_none(x: Any) -> Optional[float]:
     try:
-        if x is None:
-            return None
-        return float(x)
+        return None if x is None else float(x)
     except Exception:
         return None
 
 
 def _extract_text(resp) -> str:
-    """
-    Extract text safely from OpenAI Responses API result (SDK v1).
-    We look through the top-level output message parts for a text chunk.
-    """
-    # Preferred shape: resp.output[*].content[*].text
+    # OpenAI Responses v2 style
     try:
-        parts = getattr(resp, "output", None)
-        if parts:
-            for p in parts:
+        if hasattr(resp, "output") and resp.output:
+            for p in resp.output:
                 if getattr(p, "type", None) == "message" and getattr(p, "content", None):
                     for c in p.content:
-                        # response object uses "type": "output_text" for text content
-                        if getattr(c, "type", None) in ("output_text", "text") and hasattr(c, "text"):
+                        if getattr(c, "type", None) in ("output_text", "text"):
                             return c.text
+        if hasattr(resp, "content") and resp.content:
+            return str(resp.content)
     except Exception:
         pass
-
-    # Fallbacks
-    if hasattr(resp, "content") and resp.content:
-        return str(resp.content)
     return ""
+
+
+def _safe_usage_dict(resp) -> dict:
+    usage = getattr(resp, "usage", None)
+    out = {"prompt_tokens": None, "completion_tokens": None, "total_tokens": None}
+    if not usage:
+        return out
+    out["prompt_tokens"] = getattr(usage, "input_tokens", None) or getattr(usage, "prompt_tokens", None)
+    out["completion_tokens"] = getattr(usage, "output_tokens", None) or getattr(usage, "completion_tokens", None)
+    out["total_tokens"] = getattr(usage, "total_tokens", None)
+    return out
