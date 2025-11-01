@@ -1,22 +1,23 @@
 # ui/calendar_view.py
-"""Calendar View Widget (badges + tooltips + AI Recalculate + Status Dashboard)
+"""Calendar View Widget (badges + tooltips + AI Recalculate + Status Dashboard + Weekly Insight)
 Header is outside the scroll area to avoid right-edge clipping.
-Now includes Manage Day and Move/Copy actions and status expand/collapse.
+Includes Manage Day, Move/Copy actions, and AI Weekly Insight.
 """
 
 from typing import List, Dict, Optional
 
 from PySide6.QtWidgets import (
     QWidget, QScrollArea, QSizePolicy, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QGridLayout, QFrame, QMenu, QMessageBox, QToolButton, QApplication, QStyle
+    QGridLayout, QFrame, QMenu, QMessageBox, QToolButton
 )
-from PySide6.QtCore import Qt, QDate, QLocale, QEvent, QTimer
+from PySide6.QtCore import Qt, QDate, QLocale, QEvent
 from PySide6.QtGui import QCursor, QFontMetrics
 
 from ui.workout_dialogs import AddEditWorkoutDialog, CompleteWorkoutDialog
 from ui.ai_recalc_dialog import AIRecalcDialog
 from ui.day_workouts_dialog import DayWorkoutsDialog
 from ui.move_copy_dialog import MoveCopyDialog
+from ui.insight_dialog import InsightDialog
 from services.ai_planner import AIPlanner, PlanContext, WorkoutSuggestion
 
 
@@ -51,9 +52,10 @@ class CalendarView(QWidget):
         self.grid_layout: Optional[QGridLayout] = None
         self.month_label: Optional[QLabel] = None
         self.recalc_btn: Optional[QPushButton] = None
+        self.insight_btn: Optional[QPushButton] = None
         self.status_content: Optional[QLabel] = None
 
-        # AI planner
+        # AI planner facade (configurable at runtime)
         self._planner = AIPlanner(use_openai=False, api_key=None)
 
         self.init_ui()
@@ -61,6 +63,7 @@ class CalendarView(QWidget):
     # --- Planner config from outside (MainWindow) ---
 
     def configure_planner(self, use_openai: bool, api_key: Optional[str]):
+        """Called by MainWindow after Settings are saved."""
         self._planner.set_config(use_openai=use_openai, api_key=api_key)
 
     # --- Public API for MainWindow ---
@@ -96,16 +99,20 @@ class CalendarView(QWidget):
         page.setContentsMargins(16, 16, 16, 16)
         page.setSpacing(12)
 
+        # HEADER
         header = self.create_header()
         page.addWidget(header)
 
+        # SCROLL AREA
         scroller = QScrollArea()
         scroller.setObjectName("calendarScroll")
         scroller.setWidgetResizable(True)
         scroller.setFrameShape(QFrame.NoFrame)
         scroller.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroller.setViewportMargins(0, 0, 18, 0)
         self.scroll = scroller
 
+        # Scroll content
         scroll_content = QFrame()
         scroll_content.setObjectName("calendarContainer")
         scroll_content.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
@@ -113,9 +120,11 @@ class CalendarView(QWidget):
         scroll_v.setContentsMargins(12, 0, 12, 0)
         scroll_v.setSpacing(8)
 
+        # Weekday headers
         weekdays = self.create_weekday_headers()
         scroll_v.addWidget(weekdays)
 
+        # Calendar grid
         self.grid_container = QWidget()
         self.grid_container.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
         self.grid_layout = QGridLayout()
@@ -128,6 +137,7 @@ class CalendarView(QWidget):
         scroller.setWidget(scroll_content)
         page.addWidget(scroller)
 
+        # STATUS
         status = self.create_status_window()
         page.addWidget(status)
 
@@ -150,6 +160,7 @@ class CalendarView(QWidget):
         header_layout.setSpacing(8)
         header_layout.setContentsMargins(0, 0, 0, 0)
 
+        # Navigation group
         nav_group = QWidget()
         nav_layout = QHBoxLayout(nav_group)
         nav_layout.setSpacing(8)
@@ -157,18 +168,18 @@ class CalendarView(QWidget):
 
         prev_btn = QPushButton("◀")
         prev_btn.setObjectName("navButton")
-        prev_btn.setCursor(QCursor(Qt.PointingHandCursor))
+        prev_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         prev_btn.clicked.connect(self.previous_month)
 
         self.month_label = QLabel()
         self.month_label.setObjectName("monthLabel")
-        self.month_label.setAlignment(Qt.AlignCenter)
+        self.month_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.month_label.setFixedWidth(self._compute_month_label_width())
         self.update_month_label()
 
         next_btn = QPushButton("▶")
         next_btn.setObjectName("navButton")
-        next_btn.setCursor(QCursor(Qt.PointingHandCursor))
+        next_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         next_btn.clicked.connect(self.next_month)
 
         nav_layout.addWidget(prev_btn)
@@ -176,15 +187,23 @@ class CalendarView(QWidget):
         nav_layout.addWidget(next_btn)
         nav_group.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
 
+        # Right actions
         self.recalc_btn = QPushButton("🔄 Recalculate")
         self.recalc_btn.setObjectName("actionButton")
-        self.recalc_btn.setCursor(QCursor(Qt.PointingHandCursor))
+        self.recalc_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.recalc_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.recalc_btn.clicked.connect(self.recalculate_week)
+
+        self.insight_btn = QPushButton("🧠 Insight")
+        self.insight_btn.setObjectName("actionButton")
+        self.insight_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.insight_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.insight_btn.clicked.connect(self.generate_weekly_insight)
 
         header_layout.addStretch()
         header_layout.addWidget(nav_group, 0, Qt.AlignCenter)
         header_layout.addStretch()
+        header_layout.addWidget(self.insight_btn, 0, Qt.AlignRight)
         header_layout.addWidget(self.recalc_btn, 0, Qt.AlignRight)
 
         return header
@@ -194,11 +213,13 @@ class CalendarView(QWidget):
         layout = QHBoxLayout(container)
         layout.setSpacing(8)
         layout.setContentsMargins(0, 0, 0, 0)
+
         for day in ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]:
-            lbl = QLabel(day)
-            lbl.setObjectName("weekdayHeader")
-            lbl.setAlignment(Qt.AlignCenter)
-            layout.addWidget(lbl)
+            label = QLabel(day)
+            label.setObjectName("weekdayHeader")
+            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            layout.addWidget(label)
+
         return container
 
     # --- Calendar rendering ---
@@ -245,20 +266,9 @@ class CalendarView(QWidget):
         self._apply_cell_sizes()
         self._compact_header_if_needed()
 
-    def showEvent(self, event):
-        super().showEvent(event)
-        # Defer one tick so the viewport reports a stable width
-        QTimer.singleShot(0, self._apply_cell_sizes)
-
     def _viewport_width(self) -> int:
         if self.scroll and self.scroll.viewport():
-            vp = self.scroll.viewport()
-            w = vp.width()
-            # If a vertical scrollbar appears, the reported viewport width is already reduced,
-            # but on some platforms/layouts we can still be conservative and subtract a few px.
-            sb_w = QApplication.style().pixelMetric(QStyle.PM_ScrollBarExtent)
-            # Subtract a tiny cushion to avoid rounding overflow in cell width calc
-            return max(600, w - 2)
+            return self.scroll.viewport().width()
         return max(600, self.width() - 40)
 
     def _apply_cell_sizes(self):
@@ -278,20 +288,25 @@ class CalendarView(QWidget):
             w.setMaximumSize(16777215, 16777215)
             w.setFixedSize(cell_w, cell_h)
 
-        self.grid_container.setMinimumWidth(max(avail_w - 2, 0))
+        self.grid_container.setMinimumWidth(avail_w)
 
     def _compact_header_if_needed(self):
         try:
             vw = self.width()
             if self.recalc_btn:
-                if vw < 900 and self.recalc_btn.text() != "🔄":
+                if vw < 920 and self.recalc_btn.text() != "🔄":
                     self.recalc_btn.setText("🔄")
-                elif vw >= 900 and self.recalc_btn.text() != "🔄 Recalculate":
+                elif vw >= 920 and self.recalc_btn.text() != "🔄 Recalculate":
                     self.recalc_btn.setText("🔄 Recalculate")
+            if self.insight_btn:
+                if vw < 920 and self.insight_btn.text() != "🧠":
+                    self.insight_btn.setText("🧠")
+                elif vw >= 920 and self.insight_btn.text() != "🧠 Insight":
+                    self.insight_btn.setText("🧠 Insight")
         except Exception:
             pass
 
-    # --- Day cells / badges / tooltips ---
+    # --- Day cell creation + tooltips/badges ---
 
     def _build_tooltip_html(self, date_str: str, workouts_for_day: List[Dict]) -> str:
         if not workouts_for_day:
@@ -328,14 +343,15 @@ class CalendarView(QWidget):
     def create_day_cell(self, date: QDate) -> QFrame:
         cell = QFrame()
         cell.setObjectName("dayCell")
-        cell.setCursor(QCursor(Qt.PointingHandCursor))
+        cell.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         cell.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
 
         outer = QVBoxLayout()
-        outer.setAlignment(Qt.AlignTop)
+        outer.setAlignment(Qt.AlignmentFlag.AlignTop)
         outer.setContentsMargins(8, 8, 8, 8)
         outer.setSpacing(4)
 
+        # Top row: date number + completion/more badges
         top_row = QHBoxLayout()
         top_row.setSpacing(6)
         day_label = QLabel(str(date.day()))
@@ -348,13 +364,16 @@ class CalendarView(QWidget):
 
         any_completed = any(w.get("completed") for w in workouts_for_day)
         if any_completed:
-            top_row.addWidget(self._make_chip("✓", "chipDone"))
+            comp_badge = self._make_chip("✓", "chipDone")
+            top_row.addWidget(comp_badge)
 
         if len(workouts_for_day) > 1:
-            top_row.addWidget(self._make_chip(f"+{len(workouts_for_day)-1}", "chipMore"))
+            more_badge = self._make_chip(f"+{len(workouts_for_day)-1}", "chipMore")
+            top_row.addWidget(more_badge)
 
         outer.addLayout(top_row)
 
+        # Type chips (up to 2)
         chips_row = QHBoxLayout()
         chips_row.setSpacing(4)
         if workouts_for_day:
@@ -378,6 +397,7 @@ class CalendarView(QWidget):
                     break
         outer.addLayout(chips_row)
 
+        # Primary distance
         if workouts_for_day and workouts_for_day[0].get("planned_distance") is not None:
             dist = QLabel(f"{float(workouts_for_day[0]['planned_distance']):.1f} mi")
             dist.setObjectName("workoutDistance")
@@ -385,12 +405,15 @@ class CalendarView(QWidget):
         else:
             no_workout = QLabel("—")
             no_workout.setObjectName("noWorkout")
-            no_workout.setAlignment(Qt.AlignCenter)
+            no_workout.setAlignment(Qt.AlignmentFlag.AlignCenter)
             outer.addWidget(no_workout)
 
         cell.setLayout(outer)
+
+        # Tooltip
         cell.setToolTip(self._build_tooltip_html(date_str, workouts_for_day))
 
+        # Mouse behavior
         def _mouse_press(ev):
             if ev.button() == Qt.RightButton:
                 self._open_context_menu(date_str, workouts_for_day, cell.mapToGlobal(ev.pos()))
@@ -560,66 +583,114 @@ class CalendarView(QWidget):
         )
 
         recent = self._recent_completed_workouts(weeks=3)
-
-        # Call planner (list) OR (list, usage)
         result = self._planner.plan_week(ctx, week_dates, recent)
-        usage = None
-        if isinstance(result, tuple) and len(result) == 2:
+
+        # Handle (suggestions, usage) if using OpenAI; otherwise suggestions only
+        if isinstance(result, tuple):
             suggestions, usage = result
         else:
-            suggestions = result  # heuristic path
+            suggestions, usage = result, None
 
-        preview_rows = [{
-            "date": s.date,
-            "workout_type": s.workout_type,
-            "planned_distance": s.planned_distance,
-            "description": s.description or "",
-        } for s in suggestions]
-
-        dlg = AIRecalcDialog(self, week_dates=week_dates, suggestions=preview_rows)
+        dlg = AIRecalcDialog(
+            self,
+            week_dates=week_dates,
+            suggestions=[{
+                "date": s.date,
+                "workout_type": s.workout_type,
+                "planned_distance": s.planned_distance,
+                "description": s.description or "",
+            } for s in suggestions]
+        )
         if dlg.exec():
             self._apply_week_suggestions(week_dates, suggestions)
             self.load_workouts()
             self.refresh_calendar()
 
-            # Optional: log API usage/cost if available
-            if usage and self.db_manager:
-                toks = (usage.get("prompt_tokens") or 0) + (usage.get("completion_tokens") or 0)
-                self.db_manager.log_api_call(
-                    call_type="plan_week",
-                    plan_id=self.current_plan["id"],
-                    tokens_used=int(toks),
-                    cost_usd=usage.get("estimated_cost_usd"),
-                )
+        # Log usage if available
+        if usage and self.db_manager:
+            toks = usage.get("total_tokens")
+            cost = usage.get("estimated_cost_usd")
+            try:
+                self.db_manager.log_api_call("plan_week", self.current_plan["id"], toks, cost)
+            except Exception:
+                pass
 
-    def _apply_week_suggestions(self, week_dates: List[str], suggestions: List[WorkoutSuggestion]):
-        pid = self.current_plan["id"]
-        for d in week_dates:
-            existing = self.db_manager.get_workouts_on_date(pid, d)
-            for w in existing:
-                self.db_manager.delete_workout(w["id"])
-        for s in suggestions:
-            if s.workout_type.lower() == "rest":
-                continue
-            self.db_manager.create_workout({
-                "plan_id": pid,
-                "date": s.date,
-                "workout_type": s.workout_type,
-                "planned_distance": s.planned_distance,
-                "planned_intensity": s.planned_intensity,
-                "description": s.description,
-                "notes": None,
-                "modified_by": "ai_recalc",
-            })
+    # --- Weekly Insight ---
 
-    def _recent_completed_workouts(self, weeks: int = 3) -> List[Dict]:
+    def generate_weekly_insight(self):
         if not (self.db_manager and self.current_plan):
-            return []
+            QMessageBox.information(self, "Insight", "No plan selected.")
+            return
+
+        p = self.current_plan
+        ctx = PlanContext(
+            id=p["id"],
+            name=p.get("name", "Plan"),
+            goal_type=(p.get("goal_type") or "general").lower(),
+            start_date=p.get("start_date"),
+            race_date=p.get("race_date"),
+            duration_weeks=int(p.get("duration_weeks") or 12),
+            max_days_per_week=int(p.get("max_days_per_week") or 5),
+            long_run_day=p.get("long_run_day") or "Sunday",
+            weekly_increase_cap=float(p.get("weekly_increase_cap") or 0.10),
+            long_run_cap=float(p.get("long_run_cap") or 0.30),
+            guardrails_enabled=bool(p.get("guardrails_enabled", True)),
+        )
+
+        # Last 7 days window (inclusive)
         today = QDate.currentDate()
-        start = today.addDays(-7 * weeks).toString("yyyy-MM-dd")
+        start = today.addDays(-6).toString("yyyy-MM-dd")
         end = today.toString("yyyy-MM-dd")
-        items = self.db_manager.get_workouts_between_dates(self.current_plan["id"], start, end, current_only=True)
-        return [w for w in items if w.get("completed")]
+        workouts = self.db_manager.get_workouts_between_dates(
+            self.current_plan["id"], start, end, current_only=True
+        )
+
+        # Compute simple stats
+        planned = actual = 0.0
+        completed_count = 0
+        for w in workouts:
+            pd = w.get("planned_distance")
+            if pd is not None:
+                try: planned += float(pd)
+                except Exception: pass
+            if w.get("completed"):
+                completed_count += 1
+                ad = w.get("actual_distance")
+                use_dist = ad if ad is not None else pd
+                if use_dist is not None:
+                    try: actual += float(use_dist)
+                    except Exception: pass
+
+        stats = {
+            "window": f"{start}..{end}",
+            "planned": planned,
+            "actual": actual,
+            "completed_count": completed_count,
+            "total_count": len(workouts),
+        }
+
+        # Feed recent history for context (3 weeks)
+        recent = self._recent_completed_workouts(weeks=3)
+        text, usage = self._planner.weekly_insight(ctx, stats, recent)
+
+        # Show dialog
+        dlg = InsightDialog(self, text, usage)
+        dlg.exec()
+
+        # Log usage if available
+        if usage and self.db_manager:
+            try:
+                self.db_manager.log_api_call(
+                    "weekly_insight",
+                    self.current_plan["id"],
+                    usage.get("total_tokens"),
+                    usage.get("estimated_cost_usd"),
+                )
+            except Exception:
+                pass
+
+        # Refresh status dashboard after calling AI
+        self.update_status_dashboard()
 
     # --- Status Dashboard ---
 
@@ -641,31 +712,11 @@ class CalendarView(QWidget):
         return out
 
     def refresh_status(self):
-        """Public call to refresh the status dashboard; safe to call anytime."""
         self.update_status_dashboard()
 
     def update_status_dashboard(self):
-        if not self.status_content:
+        if not (self.db_manager and self.current_plan and self.status_content):
             return
-
-        # --- Always show API totals ---
-        api_line = ""
-        if self.db_manager:
-            try:
-                totals = self.db_manager.get_api_totals()
-                calls = totals.get("calls", 0)
-                tokens = totals.get("tokens", 0)
-                cost = totals.get("cost", 0.0)
-                api_line = f"\nAPI Usage: {calls} calls, ~{tokens} tokens, ~${cost:.4f}"
-            except Exception:
-                api_line = ""
-
-        # If plan isn't ready yet, still show API usage and a neutral message
-        if not (self.db_manager and self.current_plan):
-            self.status_content.setText(f"Status: No plan selected.{api_line}")
-            return
-
-        # --- Weekly status with plan ---
         week_start, week_end = self._current_week_range()
         workouts = self.db_manager.get_workouts_between_dates(
             self.current_plan["id"], week_start, week_end, current_only=True
@@ -694,11 +745,9 @@ class CalendarView(QWidget):
         today_str = QDate.currentDate().toString("yyyy-MM-dd")
         key = self.db_manager.get_next_key_workout(self.current_plan["id"], today_str)
         if key:
-            key_when = key.get("date");
-            key_type = (key.get("workout_type") or "").upper()
+            key_when = key.get("date"); key_type = (key.get("workout_type") or "").upper()
             key_dist = key.get("planned_distance")
-            key_line = f"Next Key Workout: {key_when} {key_type}" + (
-                f" {float(key_dist):.1f} mi" if key_dist is not None else "")
+            key_line = f"Next Key Workout: {key_when} {key_type}" + (f" {float(key_dist):.1f} mi" if key_dist is not None else "")
         else:
             key_line = "Next Key Workout: —"
         if pct >= 85:
@@ -711,7 +760,7 @@ class CalendarView(QWidget):
             f"{status_emoji} Goal Attainability: {pct:.0f}% ({status_text})\n"
             f"Week Progress ({week_start}…{week_end}): {actual:.1f}/{planned:.1f} miles "
             f"({completed_count}/{total_count} workouts completed)\n"
-            f"{key_line}{api_line}"
+            f"{key_line}"
         )
         self.status_content.setText(status)
 
@@ -729,9 +778,9 @@ class CalendarView(QWidget):
 
         self.expand_btn = QToolButton()
         self.expand_btn.setObjectName("expandButton")
-        self.expand_btn.setArrowType(Qt.UpArrow)
+        self.expand_btn.setArrowType(Qt.UpArrow if self._status_expanded else Qt.DownArrow)
         self.expand_btn.setAutoRaise(True)
-        self.expand_btn.setCursor(QCursor(Qt.PointingHandCursor))
+        self.expand_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.expand_btn.clicked.connect(self._toggle_status_panel)
 
         header.addWidget(title)
@@ -751,10 +800,9 @@ class CalendarView(QWidget):
         if self.status_content:
             self.status_content.setVisible(self._status_expanded)
         if self.expand_btn:
-            # When collapsed, show Up (click will expand); when expanded, show Down (click will collapse)
-            self.expand_btn.setArrowType(Qt.DownArrow if self._status_expanded else Qt.UpArrow)
+            self.expand_btn.setArrowType(Qt.UpArrow if self._status_expanded else Qt.DownArrow)
 
-    # --- Navigation ---
+    # --- Navigation / helpers ---
 
     def update_month_label(self):
         self.month_label.setText(self.current_date.toString("MMMM yyyy"))
@@ -785,9 +833,6 @@ class CalendarView(QWidget):
 
             QLabel#weekdayHeader { font-size: 14px; font-weight: 600; color: #7f8c8d; text-transform: uppercase; padding: 10px; }
 
-            QToolButton#expandButton { border: none; padding: 2px; margin: 0; }
-            QToolButton#expandButton:hover { background: rgba(0,0,0,0.05); border-radius: 6px; }
-
             QFrame#dayCell { background-color: #f8f9fa; border: 1px solid #ecf0f1; border-radius: 8px; padding: 6px; }
             QFrame#dayCell:hover { background-color: #e8f4f8; border-color: #3498db; }
             QFrame#emptyCell { background-color: transparent; border: none; }
@@ -797,6 +842,7 @@ class CalendarView(QWidget):
             QLabel#completedLabel { font-size: 10px; color: #27ae60; margin-top: 4px; }
             QLabel#noWorkout { font-size: 20px; color: #bdc3c7; margin-top: 8px; }
 
+            /* Chips */
             QLabel#chipDone, QLabel#chipMore, QLabel#chipEasy, QLabel#chipTempo, QLabel#chipIntervals, QLabel#chipLong, QLabel#chipRest {
                 border-radius: 10px; padding: 2px 6px; font-size: 11px; font-weight: 600; min-width: 16px;
             }
