@@ -73,6 +73,7 @@ class MainWindow(QMainWindow):
         help_menu.addAction(act_about)
 
         act_ai_diag = QAction("AI Diagnostics…", self)
+        # Route to the CalendarView's safe helper (no tuple unpacking / .get on str)
         act_ai_diag.triggered.connect(self._run_ai_diagnostics)
         help_menu.addAction(act_ai_diag)
 
@@ -90,23 +91,23 @@ class MainWindow(QMainWindow):
         """
         Pull OpenAI settings from DB and configure the Calendar's planner.
         """
-        cfg = self.db.get_openai_settings()
+        cfg = self.db.get_openai_settings()  # expected keys: use_openai (bool), api_key (str), maybe model (ignored here)
 
         # Preferred path: CalendarView exposes configure_planner()
         try:
             self.calendar_view.configure_planner(
-                use_openai=cfg["use_openai"],
-                api_key=cfg["api_key"],
+                use_openai=cfg.get("use_openai", False),
+                api_key=cfg.get("api_key"),
             )
         except Exception:
             pass
 
-        # If AIPlanner supports model in set_config, apply it too
+        # Do NOT pass model here—AIPlanner.set_config(use_openai, api_key) only takes two args.
+        # Keeping a defensive fallback in case configure_planner is absent in older builds:
         try:
             self.calendar_view._planner.set_config(
-                use_openai=cfg["use_openai"],
-                api_key=cfg["api_key"],
-                model=cfg["model"],
+                use_openai=cfg.get("use_openai", False),
+                api_key=cfg.get("api_key"),
             )
         except Exception:
             pass
@@ -156,25 +157,12 @@ class MainWindow(QMainWindow):
     # ---------------- Diagnostics / About ----------------
 
     def _run_ai_diagnostics(self):
+        """
+        Use CalendarView's safe diagnostics wrapper. This avoids the previous crash
+        where the code expected a (ok, message, usage) tuple and attempted .get on a str.
+        """
         try:
-            ok, message, usage = self.calendar_view._planner.ping()
-            details = []
-            if usage:
-                if usage.get("model"):
-                    details.append(f"Model: {usage['model']}")
-                if usage.get("prompt_tokens") is not None:
-                    details.append(f"Prompt tokens: {usage['prompt_tokens']}")
-                if usage.get("completion_tokens") is not None:
-                    details.append(f"Completion tokens: {usage['completion_tokens']}")
-                if usage.get("total_tokens") is not None:
-                    details.append(f"Total tokens: {usage['total_tokens']}")
-            extra = ("\n\n" + "\n".join(details)) if details else ""
-            if ok:
-                QMessageBox.information(self, "AI Diagnostics", f"✅ Success!\n{message}{extra}")
-            else:
-                QMessageBox.warning(self, "AI Diagnostics", f"⚠️ Check failed.\n{message}{extra}")
-            # Nudge the status dashboard so API totals appear immediately
-            self.calendar_view.refresh_status()
+            self.calendar_view.run_ai_diagnostics()
         except Exception as e:
             QMessageBox.critical(self, "AI Diagnostics", f"Unexpected error: {e}")
 
